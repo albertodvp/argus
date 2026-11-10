@@ -1,0 +1,28 @@
+{
+  // Type-check only: the dashboard JS is plain, hand-written and served as-is (no build step).
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "types": [],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "useUnknownInCatchVariables": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": false
+  },
+  "include": ["argus/dashboard/app/*.js", "argus/dashboard/app/*.d.ts", "argus/dashboard/dist/*.js", "argus/dashboard/dist/*.d.ts"]
+}

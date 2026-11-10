@@ -1,0 +1,3 @@
+from pathlib import Path
+
+def read_user_config_raw(config_path: Path | None = None) -> dict[str, object]: ...

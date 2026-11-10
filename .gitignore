@@ -1,0 +1,11 @@
+# Generated and local artifacts
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.direnv/
+result
+result-*
+node_modules/

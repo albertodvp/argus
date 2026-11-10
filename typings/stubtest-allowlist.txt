@@ -1,0 +1,5 @@
+# mypy.stubtest allowlist (`just stubtest`). Argus never constructs these Hermes objects, it only
+# receives them, so their constructors are not stubbed.
+agent.plugin_llm.PluginLlm.__init__
+hermes_cli.plugins.PluginContext.__init__
+hermes_cli.plugins_ledger.PluginRegistration.__init__

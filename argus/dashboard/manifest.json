@@ -1,0 +1,11 @@
+{
+  "name": "argus",
+  "label": "Argus",
+  "description": "Read the agent by intents and review what it learns: runs, recurring errors, skill edits and proposals.",
+  "icon": "Eye",
+  "version": "0.1.0",
+  "tab": { "path": "/argus", "position": "after:skills" },
+  "slots": ["skills:top"],
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

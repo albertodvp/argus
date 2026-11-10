@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Argus</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="bar">
+    <a class="brand" href="#/" title="Argus · a hundred eyes on what your agent learns">
+      <span class="tile"><svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><path d="M54.7,38.08 L59.05,39.25 M52.35,43.75 L58.85,47.5 M48.62,48.62 L51.8,51.8 M43.75,52.35 L47.5,58.85 M38.08,54.7 L39.25,59.05 M32,55.5 L32,63 M25.92,54.7 L24.75,59.05 M20.25,52.35 L16.5,58.85 M15.38,48.62 L12.2,51.8 M11.65,43.75 L5.15,47.5 M9.3,38.08 L4.95,39.25 M9.3,25.92 L4.95,24.75 M11.65,20.25 L5.15,16.5 M15.38,15.38 L12.2,12.2 M20.25,11.65 L16.5,5.15 M25.92,9.3 L24.75,4.95 M32,8.5 L32,1 M38.08,9.3 L39.25,4.95 M43.75,11.65 L47.5,5.15 M48.62,15.38 L51.8,12.2 M52.35,20.25 L58.85,16.5 M54.7,25.92 L59.05,24.75" stroke="currentColor" stroke-width="2.2"/><path d="M8,32 Q32,8 56,32 Q32,56 8,32 Z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="miter"/><circle cx="32" cy="32" r="8.6" fill="none" stroke="currentColor" stroke-width="2.6"/><circle cx="32" cy="32" r="4" fill="currentColor"/></svg></span>
+      <svg class="wm" viewBox="0 0 328 110" aria-label="Argus"><path d="M 5,105 L 28,5 L 51,105 M 12.36,73 H 43.64 M 73,105 V 5 H 96 A 23,23 0 0 1 119,28 V 38 A 23,23 0 0 1 96,61 H 73 M 96,61 L 119,105 M 187,28 A 23,23 0 0 0 141,28 V 82 A 23,23 0 0 0 187,82 V 61 H 164.92 M 209,5 V 82 A 23,23 0 0 0 255,82 V 5 M 323,28 A 23,23 0 0 0 277,28 C 277,48 323,62 323,82 A 23,23 0 0 1 277,82" fill="none" stroke="currentColor" stroke-width="10" stroke-miterlimit="8"/></svg>
+    </a>
+    <nav class="harness" id="harnesses"></nav>
+    <span class="spacer"></span>
+    <span class="dim" id="gen"></span>
+    <span id="refresh"></span>
+  </div>
+  <div class="bar sub">
+    <nav class="tabs" id="tabs"></nav>
+    <span class="spacer"></span>
+    <nav class="pf" id="pf"></nav>
+  </div>
+</header>
+<main id="view"></main>
+<div id="dock" class="dock" hidden></div>
+<div id="tip" class="tip" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

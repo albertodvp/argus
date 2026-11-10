@@ -1,0 +1,25 @@
+name: argus
+version: 0.1.0
+description: "Argus reads a Hermes agent by intents instead of sessions and reviews what it learns: skill edits made without evidence and the skill edits it proposes, in a dashboard tab and `hermes argus`."
+author: albertodvp
+requires_hermes: ">=0.22.5"
+provides_hooks:
+  - pre_llm_call
+  - post_tool_call
+  - on_session_end
+  - on_skill_lifecycle
+  - on_session_delete
+capabilities: []
+config_schema:
+  interval_minutes:
+    type: int
+    default: 60
+    description: "Minimum minutes between two automatic derivation passes."
+  idle_minutes:
+    type: int
+    default: 10
+    description: "Minutes without a finished turn before an automatic derivation pass starts."
+  since_days:
+    type: int
+    default: 30
+    description: "History window (days) a profile's first `hermes argus backfill` sets when --since is not given; derive and the dashboard read only sessions active in it. Later changes need `backfill --since DAYS`, which widens the window, never narrows it (0 = no window from this setting; `--since 0` asks for the whole history)."

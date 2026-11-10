@@ -1,0 +1,22 @@
+from pathlib import Path
+from typing import TypedDict
+
+class _FoundSkill(TypedDict):
+    path: Path
+
+def _find_skill(name: str) -> _FoundSkill | None: ...
+def skill_manage(
+    action: str,
+    name: str,
+    content: str | None = None,
+    category: str | None = None,
+    file_path: str | None = None,
+    file_content: str | None = None,
+    old_string: str | None = None,
+    new_string: str | None = None,
+    replace_all: bool = False,
+    absorbed_into: str | None = None,
+    task_id: str | None = None,
+    session_id: str | None = None,
+    operations: list[dict[str, object]] | None = None,
+) -> str: ...

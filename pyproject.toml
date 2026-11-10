@@ -1,0 +1,106 @@
+[project]
+name = "argus"
+version = "0.1.0"
+description = "Hermes Agent plugin: read the agent by intents and review what it learns"
+readme = "README.md"
+# Argus runs inside Hermes and uses only what Hermes ships (pydantic; fastapi in the dashboard backend).
+# The plugin is copied into a Hermes install, never built or installed: the project is not packaged.
+requires-python = ">=3.11,<3.15"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  # pinned like Hermes (hermes-agent pyproject) so the checked code runs against what Hermes installs
+  "fastapi==0.133.1",
+  "pydantic==2.14.1",
+  "starlette==1.9.0",
+  "mypy==2.4.0",
+  "pytest==9.1.1",
+]
+
+[tool.uv]
+required-version = "==0.13.0"
+package = false
+
+[tool.mypy]
+python_version = "3.11"
+files = ["argus", "tests"]
+mypy_path = "typings"
+strict = true
+plugins = ["pydantic.mypy"]
+
+# Reject Any types in annotations, expressions, and dependencies.
+disallow_any_explicit = true
+disallow_any_expr = true
+disallow_any_decorated = true
+disallow_any_unimported = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+
+# Require fully typed functions, calls, and decorators.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+check_untyped_defs = true
+
+# Keep import failures visible and require explicit re-exports.
+ignore_missing_imports = false
+follow_imports = "normal"
+implicit_reexport = false
+
+# Preserve strict handling of None, equality, and bytes.
+implicit_optional = false
+strict_optional = true
+strict_equality = true
+strict_equality_for_none = true
+strict_bytes = true
+
+# Reject unsafe returns, redundant casts, and stale suppressions.
+warn_return_any = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+warn_no_return = true
+extra_checks = true
+warn_unused_configs = true
+report_deprecated_as_note = false
+
+# Enable optional diagnostics beyond strict mode.
+enable_error_code = [
+  "deprecated",
+  "exhaustive-match",
+  "explicit-override",
+  "ignore-without-code",
+  "mutable-override",
+  "possibly-undefined",
+  "redundant-expr",
+  "redundant-self",
+  "truthy-bool",
+  "truthy-iterable",
+  "unimported-reveal",
+  "unused-awaitable",
+]
+
+# Keep diagnostics actionable.
+show_error_codes = true
+show_column_numbers = true
+pretty = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ANN"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "--strict-config --strict-markers -ra"
+filterwarnings = ["error"]
