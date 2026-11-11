@@ -40,7 +40,7 @@ stubtest hermes:
         MYPYPATH="{{justfile_directory()}}/typings" "$tmp/venv/bin/python" -m mypy.stubtest --ignore-missing-stub \
         --allowlist "{{justfile_directory()}}/typings/stubtest-allowlist.txt" \
         hermes_constants hermes_bootstrap tools.skill_ledger tools.skill_manager_tool agent.plugin_llm \
-        hermes_cli.plugins hermes_cli.plugins_ledger hermes_cli.config
+        hermes_cli.plugins hermes_cli.plugins_ledger tools.skills_tool
 
 # The plugin catalog's admission check (`hermes plugins validate --install-deps`) on the committed
 # argus/ at `rev` (what a catalog pin would read), with a fresh Hermes checkout at `hermes_ref` (the

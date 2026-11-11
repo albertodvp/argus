@@ -1,14 +1,18 @@
 """Argus finds a profile's skills where Hermes does: `skills/`, then `skills.create_dir` and
-`skills.external_dirs` from its config.yaml. A skill kept in an external directory is a skill of
-the profile: proposals can name it, and it is not taken for one removed outside Hermes."""
+`skills.external_dirs`, as Hermes' published `tools.skills_tool.skill_search_dirs` lists them for
+that profile. A skill kept in an external directory is a skill of the profile: proposals can name
+it, and it is not taken for one removed outside Hermes. Argus never reads config.yaml itself."""
 
 import sys
 import types
+from contextvars import ContextVar, Token
 from pathlib import Path
 
 import pytest
 
 from argus import store
+
+PROJECT, LOCAL, CREATE_DIR, EXTERNAL = range(4)  # Hermes' agent.skill_utils tiers
 
 
 def _skill(root: Path, category: str, name: str) -> Path:
@@ -19,30 +23,43 @@ def _skill(root: Path, category: str, name: str) -> Path:
 
 
 @pytest.fixture()
-def config(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
-    """Hermes' public config reader, answering `cfg` for the profile's config.yaml."""
-    cfg: dict[str, object] = {}
-    mod = types.ModuleType("hermes_cli.config")
+def hermes(monkeypatch: pytest.MonkeyPatch) -> dict[Path, list[tuple[int, Path]]]:
+    """Hermes' public skill roots: `skill_search_dirs()` answers for the Hermes home in force
+    (`hermes_constants.set_hermes_home_override`), from `roots[home]`; the process's own home is
+    `/nowhere`, so a lookup that forgets the override finds nothing."""
+    roots: dict[Path, list[tuple[int, Path]]] = {}
+    override: ContextVar[str | None] = ContextVar("override", default=None)
 
-    def read_user_config_raw(config_path: Path | None = None) -> dict[str, object]:
-        return cfg if config_path is not None and config_path.exists() else {}
+    def set_hermes_home_override(path: str | Path | None) -> Token[str | None]:
+        return override.set(None if path is None else str(path))
 
-    mod.read_user_config_raw = read_user_config_raw  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
-    monkeypatch.setitem(sys.modules, "hermes_cli.config", mod)
-    return cfg
+    def reset_hermes_home_override(token: Token[str | None]) -> None:
+        override.reset(token)
+
+    def skill_search_dirs() -> tuple[list[tuple[int, Path]], Path]:
+        home = Path(override.get() or "/nowhere")
+        return roots.get(home, []), home / "skills"
+
+    constants = types.ModuleType("hermes_constants")
+    constants.set_hermes_home_override = set_hermes_home_override  # type: ignore[attr-defined]
+    constants.reset_hermes_home_override = reset_hermes_home_override  # type: ignore[attr-defined]
+    skills_tool = types.ModuleType("tools.skills_tool")
+    skills_tool.skill_search_dirs = skill_search_dirs  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_constants", constants)
+    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
+    monkeypatch.setitem(sys.modules, "tools.skills_tool", skills_tool)
+    return roots
 
 
 def test_external_and_create_dirs_hold_skills_of_the_profile(
-    tmp_path: Path, config: dict[str, object]
+    tmp_path: Path, hermes: dict[Path, list[tuple[int, Path]]]
 ) -> None:
     home, ext = tmp_path / "home", tmp_path / "shared-skills"
     own = _skill(home / "skills", "general", "hermes-agent")
     shadowed = _skill(ext, "domain", "hermes-agent")  # the local copy wins, as in Hermes
     domain = _skill(ext, "domain", "import-rules")
     made = _skill(home / "made", "x", "new-one")
-    (home / "config.yaml").write_text("skills: {}\n", encoding="utf-8")
-    config["skills"] = {"create_dir": "made", "external_dirs": [str(ext)]}
+    hermes[home] = [(LOCAL, home / "skills"), (CREATE_DIR, home / "made"), (EXTERNAL, ext)]
 
     files = store.skill_files(home)
     assert files == {"hermes-agent": own, "import-rules": domain, "new-one": made}
@@ -61,19 +78,63 @@ def test_external_and_create_dirs_hold_skills_of_the_profile(
         conn.close()
 
 
-def test_a_single_external_dir_written_as_a_scalar(
-    tmp_path: Path, config: dict[str, object]
+def test_each_profile_gets_its_own_dirs_in_one_process(
+    tmp_path: Path, hermes: dict[Path, list[tuple[int, Path]]]
 ) -> None:
-    home, ext = tmp_path / "home", tmp_path / "ext"
-    domain = _skill(ext, "d", "only")
-    (home / "skills").mkdir(parents=True)
-    (home / "config.yaml").write_text("skills: {}\n", encoding="utf-8")
-    config["skills"] = {"external_dirs": str(ext)}
-    assert store.skill_files(home) == {"only": domain}
+    """Export and derive read every profile from one process: the roots come from the profile
+    asked for, not from the profile the process runs as."""
+    a, b, ext = tmp_path / "a", tmp_path / "b", tmp_path / "ext"
+    shared = _skill(ext, "d", "shared-one")
+    own_b = _skill(b / "skills", "c", "own")
+    hermes[a] = [(LOCAL, a / "skills"), (EXTERNAL, ext)]
+    hermes[b] = [(LOCAL, b / "skills")]
+    assert store.skill_files(a) == {"shared-one": shared}
+    assert store.skill_files(b) == {"own": own_b}
 
 
-def test_without_hermes_only_the_profile_skills(tmp_path: Path) -> None:
+def test_trusted_project_dirs_are_not_skills_of_the_profile(
+    tmp_path: Path, hermes: dict[Path, list[tuple[int, Path]]]
+) -> None:
+    """Project skill dirs follow the cwd of whoever asks, and skill_manage never writes there."""
+    home, repo = tmp_path / "home", tmp_path / "repo" / ".hermes" / "skills"
+    own = _skill(home / "skills", "c", "s")
+    _skill(repo, "p", "from-the-repo")
+    hermes[home] = [(PROJECT, repo), (LOCAL, home / "skills")]
+    assert store.skill_search_roots(home) == [(LOCAL, home / "skills")]
+    assert store.skill_files(home) == {"s": own}
+
+
+def test_without_the_profile_skills_dir_project_dirs_cannot_be_told_apart(
+    tmp_path: Path, hermes: dict[Path, list[tuple[int, Path]]]
+) -> None:
+    """Hermes drops a missing `skills/` from its roots, and only `skills/` marks where the project
+    dirs before it end: Argus then cannot list the profile's roots (apply refuses on None) and
+    readers keep to `skills/`, never to a project dir."""
+    home, repo, ext = tmp_path / "home", tmp_path / "repo" / ".hermes" / "skills", tmp_path / "ext"
+    _skill(repo, "p", "from-the-repo")
+    _skill(ext, "d", "shared")
+    hermes[home] = [(PROJECT, repo), (EXTERNAL, ext)]
+    assert store.hermes_skill_roots(home) is None
+    assert store.skill_files(home) == {}
+    hermes[home] = []
+    assert store.hermes_skill_roots(home) == []
+
+
+def test_a_missing_dir_listed_by_hermes_is_skipped(
+    tmp_path: Path, hermes: dict[Path, list[tuple[int, Path]]]
+) -> None:
     home = tmp_path / "home"
     own = _skill(home / "skills", "c", "s")
-    (home / "config.yaml").write_text("skills: {}\n", encoding="utf-8")
+    hermes[home] = [(LOCAL, home / "skills"), (CREATE_DIR, home / "not-made-yet")]
+    assert store.skill_roots(home) == [home / "skills"]
+    assert store.skill_files(home) == {"s": own}
+
+
+def test_without_hermes_only_the_profile_skills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "tools.skills_tool", None)  # import fails
+    home = tmp_path / "home"
+    own = _skill(home / "skills", "c", "s")
+    assert store.skill_search_roots(home) == []
     assert store.skill_files(home) == {"s": own}

@@ -1,0 +1,6 @@
+from pathlib import Path
+
+def skill_search_dirs() -> tuple[list[tuple[int, Path]], Path]: ...
+def locate_skill(
+    name: str, local_category_name: str | None, roots: list[tuple[int, Path]]
+) -> tuple[str | None, Path | None, Path | None]: ...

@@ -59,7 +59,11 @@ and the status counts read only sessions with a message in the window. Derive sk
 backfilled (idle trigger and dashboard refresh included); on the others it first catches up with
 the tool outcomes and ledger entries since the last backfill, which keeps profiles without the
 plugin (no hooks there) current. Skills are found where Hermes finds them: the profile's `skills/`,
-then `skills.create_dir` and `skills.external_dirs` from its `config.yaml`. A Hermes run in a
+then `skills.create_dir` and `skills.external_dirs`, as Hermes' `skill_search_dirs` lists them for
+that profile (trusted project skill dirs left out). Two limits come from Hermes: a trusted project's
+skill dir that the profile also lists in `external_dirs` or `create_dir` is left out while Argus
+runs inside that project, and an external dir created after the first lookup is seen only once
+`config.yaml` changes. A Hermes run in a
 container or behind a wrapper needs that instance's own CLI in place of `hermes`.
 
 ## What Argus does on your machine
@@ -78,9 +82,10 @@ What a user should know before installing (catalog rule 13):
   `status` print the next pass's count. After 5 model errors in a row (provider down, quota) the
   pass stops and exits non-zero. Argus makes no other network request and sends no telemetry.
 - **Reads outside its own data, read-only.** Each profile's `state.db`, the curator ledger
-  `skills/.curator_ledger.jsonl` and its blob store `.curator_backups/blobs/`, the `skills` section
-  of its `config.yaml` (`create_dir`, `external_dirs`), the `SKILL.md` files of its skill
-  directories and staged writes under `pending/skills/`. With `--all`, and always in the dashboard,
+  `skills/.curator_ledger.jsonl` and its blob store `.curator_backups/blobs/`, the `SKILL.md` files
+  of the skill directories Hermes' `skill_search_dirs` lists for it (`skills/`, `skills.create_dir`,
+  `skills.external_dirs`; Argus does not parse `config.yaml` or use any value in it, Hermes reads
+  the profile's configuration to answer) and staged writes under `pending/skills/`. With `--all`, and always in the dashboard,
   that is every profile of the install, including profiles that do not enable Argus. The dashboard
   tells whether a derive pass is running from the profiles' `derive.lock`, and whether Argus changed
   on disk from the files of its own directory.

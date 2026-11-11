@@ -1,7 +1,8 @@
 """Plugin storage: one SQLite file per Hermes profile at <home>/plugin-data/argus/data.db.
 
 Free of Hermes imports at module level, so the dashboard and the CLI can import it standalone
-(the profile's skill directories read Hermes' YAML reader lazily, when present).
+(the profile's skill directories come from Hermes' skill_search_dirs, imported lazily when
+present).
 """
 
 from __future__ import annotations
@@ -17,8 +18,6 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, TypeAlias, TypeVar, overload
 
-from pydantic import TypeAdapter
-
 from .dbtypes import PROPOSAL_ROW, SQLITE_ROW, count, query_as, query_one
 
 T = TypeVar("T")
@@ -30,8 +29,6 @@ SCHEMA_VERSION: Final = 2
 SCHEMA_FILE: Final = Path(__file__).with_name("schema.sql")
 
 log = logging.getLogger("hermes.plugins.argus")
-_MAP: Final = TypeAdapter(dict[str, object])
-_LIST: Final = TypeAdapter(list[object])
 
 
 def profile_homes(root: Path) -> dict[str, Path]:
@@ -179,35 +176,68 @@ def speculative_edits(conn: sqlite3.Connection) -> int:
     )
 
 
-def _config_skill_dirs(home: Path) -> list[Path]:
-    """`skills.create_dir` and `skills.external_dirs` of the profile's config.yaml, in Hermes'
-    lookup order, as Hermes reads them (`~` and `${VAR}` expanded, a relative path under the
-    profile home); none when the config or Hermes' config reader is missing or unreadable."""
+def _hermes_search_dirs(home: Path) -> tuple[list[tuple[int, Path]], Path] | None:
+    """Hermes' published `tools.skills_tool.skill_search_dirs()` for the profile at `home`: its
+    `(tier, dir)` roots in precedence order and the profile's `skills/`, run with that profile as
+    the Hermes home so one process can read every profile. None when Hermes is not importable or
+    fails."""
     try:
-        from hermes_cli.config import read_user_config_raw
-
-        cfg = read_user_config_raw(Path(home) / "config.yaml")
-        skills = _MAP.validate_python(cfg.get("skills") or dict[str, object]())
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        from tools.skills_tool import skill_search_dirs
     except Exception:
-        return []
-    ext = skills.get("external_dirs")
+        return None
     try:
-        listed = _LIST.validate_python(ext)
-    except ValueError:  # a single path written as a scalar
-        listed = [ext]
-    out: list[Path] = []
-    for e in [skills.get("create_dir"), *listed]:
-        if isinstance(e, str) and e.strip():
-            p = Path(os.path.expanduser(os.path.expandvars(e.strip())))
-            out.append(p if p.is_absolute() else Path(home) / p)
-    return out
+        tok = set_hermes_home_override(str(home))
+        try:
+            roots, active = skill_search_dirs()
+        finally:
+            reset_hermes_home_override(tok)
+    except Exception:
+        log.debug("argus: skill_search_dirs failed for %s", home, exc_info=True)
+        return None
+    return [(t, Path(d)) for t, d in roots], Path(active)
+
+
+def hermes_all_skill_roots(home: Path) -> list[tuple[int, Path]] | None:
+    """`(tier, dir)` of every skill root Hermes reports for the profile at `home`, trusted project
+    dirs included. None when Hermes cannot answer."""
+    found = _hermes_search_dirs(home)
+    return None if found is None else found[0]
+
+
+def hermes_skill_roots(home: Path) -> list[tuple[int, Path]] | None:
+    """The profile's own skill roots in Hermes' precedence order (`skills/`, `skills.create_dir`,
+    `skills.external_dirs`): the roots from the profile's `skills/` on. Trusted project dirs
+    precede it (project > local > create_dir > external); they follow the cwd of the process that
+    asks, not the profile, and `skill_manage` never writes there. None when Hermes cannot answer,
+    which apply must tell apart from a profile without skill dirs: also when Hermes lists roots
+    but not `skills/` (it drops a missing one), as nothing then marks where project dirs end.
+
+    Known limits, both Hermes': Hermes drops duplicate roots after ordering them, so a trusted
+    project's skill dir that the profile also lists in `external_dirs`/`create_dir` comes before
+    `skills/` while the process runs inside that project and is left out too (apply still
+    counts it, see apply._writer_name); and an external dir that did not exist at the first lookup
+    stays unseen until config.yaml changes."""
+    found = _hermes_search_dirs(home)
+    if found is None:
+        return None
+    roots, active = found
+    dirs = [d for _t, d in roots]
+    if active in dirs:
+        return roots[dirs.index(active) :]
+    return None if roots else []
+
+
+def skill_search_roots(home: Path) -> list[tuple[int, Path]]:
+    """`hermes_skill_roots`, empty when Hermes cannot answer (readers fall back to `skills/`)."""
+    return hermes_skill_roots(home) or []
 
 
 def skill_roots(home: Path) -> list[Path]:
     """The directories Hermes finds the profile's skills in, in its lookup order: `skills/`, then
-    `skills.create_dir` and `skills.external_dirs` (existing ones only)."""
+    `skills.create_dir` and `skills.external_dirs` (existing ones only, `skill_search_roots`)."""
     roots = [Path(home) / "skills"]
-    for p in _config_skill_dirs(home):
+    for _tier, p in skill_search_roots(home):
         if p.is_dir() and all(p.resolve() != r.resolve() for r in roots):
             roots.append(p)
     return roots
