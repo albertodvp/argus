@@ -1,5 +1,5 @@
 name: argus
-version: 0.1.0
+version: 0.1.1
 description: "Argus reads a Hermes agent by intents instead of sessions and reviews what it learns: skill edits made without evidence and the skill edits it proposes, in a dashboard tab and `hermes argus`."
 author: albertodvp
 requires_hermes: ">=0.22.5"

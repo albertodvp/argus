@@ -1,6 +1,6 @@
 [project]
 name = "argus"
-version = "0.1.0"
+version = "0.1.1"
 description = "Hermes Agent plugin: read the agent by intents and review what it learns"
 readme = "README.md"
 # Argus runs inside Hermes and uses only what Hermes ships (pydantic; fastapi in the dashboard backend).
