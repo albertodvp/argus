@@ -5,6 +5,7 @@ The JSON contract is exporttypes.Export."""
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -202,18 +203,23 @@ def _applied(
     return {**a, "rolled_back": rb} if a and rb else a
 
 
-# a ledger write as _approved reads it: entry id, action, ts, its skill's SKILL.md before and after
-_Write = tuple[str, str | None, float, str | None, str | None]
+# a ledger write as _approved reads it: entry id, action, ts, the SKILL.md it changed (path, text
+# before, text after)
+_Write = tuple[str, str | None, float, str, str | None, str | None]
 _Writes: TypeAlias = dict[tuple[str, str | None], list[_Write]]  # (profile, skill) -> oldest first
 
 
 def _approved(
-    pr: ProposalRow, staged: ApplyAttempt, writes: Sequence[_Write]
+    pr: ProposalRow, staged: ApplyAttempt, writes: Sequence[_Write], target: str | None
 ) -> ApplyAttempt | None:
     """A proposal's staged apply whose pending write is gone, as `applied` with its ledger entry
     when the ledger has that write since: approved, under the approver's actor. None otherwise:
-    rejected (or approved before the history window)."""
-    for entry, action, ts, before, after in writes:
+    rejected (or approved before the history window). `target` is the resolved SKILL.md an apply of
+    this proposal stages (apply writes only in the profile's skills/); a write to another file of
+    the same skill name (another category, root or nesting) is not this approval."""
+    for entry, action, ts, path, before, after in writes:
+        if target is not None and os.path.realpath(path) != target:
+            continue
         if ts >= staged["at"] and apply.written_by(pr, action, before, after):
             return {
                 **staged,
@@ -492,7 +498,9 @@ def _learnings(
             )
             ts = en["ts_epoch"] or (edit_row["ts"] if edit_row else 0) or 0
             changed = hermes_data.changed_md(en, blobs)
-            skill_md = next((ba for fp, ba in changed.items() if fp.endswith("/SKILL.md")), None)
+            skill_md = next(
+                ((fp, *ba) for fp, ba in changed.items() if fp.endswith("/SKILL.md")), None
+            )
             if skill_md is not None and en.get("action") in ("patch", "create"):
                 writes.setdefault((name, en.get("skill")), []).append(
                     (en["id"], en.get("action"), ts, *skill_md)
@@ -607,7 +615,12 @@ def _proposals(
             key_p: _Target = ("proposal", pr["id"])
             staged, attempt = p["released"].get(key_p), p["attempts"].get(key_p)
             approved = (
-                _approved(pr, staged, writes.get((name, pr["skill_name"].removeprefix("new:")), []))
+                _approved(
+                    pr,
+                    staged,
+                    writes.get((name, pr["skill_name"].removeprefix("new:")), []),
+                    os.path.realpath(homes[name] / "skills" / pr["file"]) if pr["file"] else None,
+                )
                 if staged
                 else None
             )

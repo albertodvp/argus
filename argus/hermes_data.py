@@ -119,9 +119,11 @@ class LedgerLine(TypedDict):
 
 
 class LedgerEntry(LedgerLine):
-    """A ledger line with its `ts` as epoch seconds."""
+    """A ledger line with its `ts` as epoch seconds; `skill` is the skill's directory name, and
+    `qualified` the name skill_manage was given (`cat/sk` for a category path, else as `skill`)."""
 
     ts_epoch: float
+    qualified: NotRequired[str | None]
 
 
 class Dump(TypedDict):
@@ -267,7 +269,11 @@ def parse_ledger_line(line: str) -> LedgerEntry | None:
         ts_epoch = datetime.fromisoformat(e["ts"]).timestamp()
     except Exception:
         return None
-    entry: LedgerEntry = {**e, "ts_epoch": ts_epoch}
+    entry: LedgerEntry = {**e, "ts_epoch": ts_epoch, "qualified": e.get("skill")}
+    if (skill := e.get("skill")) and "/" in skill:
+        # skill_manage called with a category path (`cat/sk`, as Argus' apply does): the skill is
+        # its directory name everywhere else
+        entry["skill"] = skill.rstrip("/").rsplit("/", 1)[-1]
     return entry if entry["id"] else None
 
 

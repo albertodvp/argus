@@ -30,3 +30,13 @@ def test_skill_reads_skip_malformed_tool_calls(tmp_path: Path) -> None:
     dump = hermes_data.load_dump(home)
     assert [name for _sid, _ts, name in hermes_data.skill_reads([dump])] == ["k"]
     export.build(home)  # the dashboard export reads the same calls
+
+
+def test_a_ledger_skill_named_by_its_category_path_is_its_directory() -> None:
+    """Apply calls skill_manage with `cat/sk` to pin the file; the skill is still `sk`."""
+    from argus import hermes_data
+
+    e = hermes_data.parse_ledger_line(
+        '{"id": "a1", "ts": "2026-11-11T10:00:00+00:00", "skill": "cat/sk", "action": "patch"}'
+    )
+    assert e is not None and e.get("skill") == "sk" and e.get("qualified") == "cat/sk"

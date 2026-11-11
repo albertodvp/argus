@@ -5,7 +5,8 @@ write approval); an accepted proposal is inserted with
 `tools.skill_manager_tool.skill_manage(action="patch")`, or becomes a new skill with
 `skill_manage(action="create")` when it proposes one; both refuse a locked skill and stage the
 write when `skills.write_approval` is on. Both run with the ledger actor `user`; a staged write
-gets the actor of whoever approves it.
+gets the actor of whoever approves it. The skill a proposal names is resolved with Hermes'
+published `tools.skills_tool.locate_skill`; a name Hermes cannot resolve to one skill is refused.
 
 Hermes is imported lazily inside the functions: the module stays importable by the dashboard
 backend (which only uses `result`/`log_attempt`), and a Hermes without these internals gives a
@@ -417,8 +418,17 @@ def written_by(row: ProposalRow, action: str | None, before: str | None, after: 
     return bool(new) and new in _norm(after) and new not in _norm(before)
 
 
-def _skill_call(action: str, name: str, kind: str, pid: str, **args: str) -> ApplyResult:
-    """Run skill_manage as the ledger actor `user` and turn its JSON into an apply result."""
+def _skill_call(
+    home: Path,
+    action: str,
+    name: str,
+    kind: str,
+    pid: str,
+    expect: Path | None = None,
+    **args: str,
+) -> ApplyResult:
+    """Run skill_manage as the ledger actor `user` and turn its JSON into an apply result. With
+    `expect` (the SKILL.md apply checked), the ledger entry of the write must name that file."""
     try:
         from tools import skill_ledger as sl
         from tools import skill_manager_tool as smt
@@ -455,16 +465,39 @@ def _skill_call(action: str, name: str, kind: str, pid: str, **args: str) -> App
             pending_id=r.get("pending_id"),
         )
     if r.get("success"):
-        new_id = next(
+        new = next(
             (
-                x["id"]
-                for x in sl.list_entries(skill=name, limit=50)
+                x
+                for x in _ledger(sl.list_entries(skill=name, limit=50))
                 if x.get("id") not in seen
                 and x.get("actor") == "user"
                 and x.get("action") == action
             ),
             None,
         )
+        new_id = new["id"] if new else None
+        written = {os.path.realpath(p) for p in _paths(new) if p} if new else set()
+        if expect is not None and os.path.realpath(expect) not in written:
+            # the write happened, but not provably to the file apply checked
+            what = (
+                f"skill_manage wrote {', '.join(sorted(written))}, not the checked {expect}"
+                if written
+                else f"skill_manage reported success but left no ledger entry naming {expect} "
+                "(skills.ledger off?), so the file it wrote is not known"
+            )
+            undo = (
+                f"; `hermes -p {store.profile_name(home)} curator rollback {new_id}` undoes it "
+                "inside the profile home, files outside it must be restored by hand"
+                if new_id
+                else ""
+            )
+            return result(
+                "unknown",
+                f"{what}. Check the skill before applying again{undo}",
+                kind,
+                pid,
+                ledger_entry=as_str(new_id),
+            )
         done = "created" if action == "create" else "patched"
         return result("applied", r.get("message") or done, kind, pid, ledger_entry=as_str(new_id))
     return result(
@@ -475,17 +508,175 @@ def _skill_call(action: str, name: str, kind: str, pid: str, **args: str) -> App
     )
 
 
+# directories Hermes' skill scanners skip in every supported version (agent.skill_utils
+# EXCLUDED_SKILL_DIRS of 0.22.5): pruned when counting the directories skill_manage may pick
+_SKIPPED_DIRS: Final = frozenset(
+    {
+        ".git",
+        ".github",
+        ".hub",
+        ".archive",
+        ".curator_backups",
+        ".locks",
+        ".venv",
+        "venv",
+        "node_modules",
+        "site-packages",
+        "__pycache__",
+        ".tox",
+        ".nox",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+    }
+)
+# skipped by some supported versions only (DIST_SWAP_DIR, later than 0.22.5): never pruned when
+# counting, but a target under one is refused
+_SOMETIMES_SKIPPED: Final = frozenset({".hermes-dist"})
+# a skill's own support dirs, never scanned as skills (agent.skill_utils SKILL_SUPPORT_DIRS)
+_SUPPORT_DIRS: Final = frozenset({"references", "templates", "assets", "scripts"})
+
+
+def _crosses_symlink(root: Path, path: Path) -> bool:
+    """Whether `path` (under `root`) is reached through a symlink below `root`."""
+    cur = root
+    for part in path.relative_to(root).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            return True
+    return False
+
+
+def _scanner_skips(md: Path) -> bool:
+    """Whether Hermes' skill scanners skip this SKILL.md (its `is_excluded_skill_path`): a skipped
+    directory anywhere in the path, or a support dir directly inside another skill."""
+    parts = md.parts
+    return any(part in _SKIPPED_DIRS | _SOMETIMES_SKIPPED for part in parts) or any(
+        part in _SUPPORT_DIRS and (Path(*parts[:i]) / "SKILL.md").exists()
+        for i, part in enumerate(parts[:-1])
+        if i > 0
+    )
+
+
+def _dirs_named(name: str, roots: list[tuple[int, Path]]) -> list[Path]:
+    """Every SKILL.md in a directory called `name` under the roots, each place it is reached
+    (symlinks followed, a directory already on the current path skipped as a cycle): a superset
+    of what `skill_manage` can pick for `name` by directory name. Only Hermes' skipped dirs and
+    the support dirs of a skill are pruned, as its scanners do."""
+    out: list[Path] = []
+
+    def walk(d: Path, ancestors: frozenset[str]) -> None:
+        try:
+            with os.scandir(d) as it:
+                entries: list[os.DirEntry[str]] = list(it)
+        except OSError:
+            return
+        names = {e.name for e in entries}
+        is_skill = "SKILL.md" in names
+        if is_skill and d.name == name:
+            out.append(d / "SKILL.md")
+        for e in entries:
+            if e.name in _SKIPPED_DIRS or (is_skill and e.name in _SUPPORT_DIRS):
+                continue
+            try:
+                if not e.is_dir():  # follows symlinks
+                    continue
+            except OSError:
+                continue
+            real = os.path.realpath(e.path)
+            if real not in ancestors:
+                walk(Path(e.path), ancestors | {real})
+
+    for _tier, root in roots:
+        walk(root, frozenset({os.path.realpath(root)}))
+    return out
+
+
+def _locate(home: Path, name: str) -> tuple[Path | None, str | None]:
+    """The skill `name` of the profile as Hermes resolves it, with the published
+    `tools.skills_tool.locate_skill` over the profile's roots (`store.hermes_skill_roots`):
+    `(file, None)` for one skill, `(None, None)` when none has that name (and no directory has it),
+    `(None, reason)` when Hermes refuses to pick one or cannot answer. Raises ImportError without
+    Hermes."""
+    from tools.skills_tool import locate_skill
+
+    if "/" in name or "\\" in name:
+        return None, f"apply takes a bare skill name, not the path {name}."
+    roots = store.hermes_skill_roots(Path(home))
+    if roots is None:
+        return None, "Hermes could not list the profile's skill directories."
+    if not roots:
+        return None, None
+    err, _dir, md = locate_skill(name, None, roots)
+    if md is not None:
+        return md, None
+    try:
+        answer = loads_object(err or "")
+    except ValueError:
+        return None, err or f"Hermes could not resolve skill {name}."
+    if "available_skills" in answer:  # Hermes' "not found" answer
+        if named := _dirs_named(name, store.hermes_all_skill_roots(Path(home)) or roots):
+            return None, f"Hermes reports it missing, but {named[0]} exists."
+        return None, None
+    return None, as_str(answer.get("error")) or f"Hermes could not resolve skill {name}."
+
+
+def _writer_name(home: Path, name: str, md: Path) -> tuple[str | None, str | None]:
+    """The name to give `skill_manage` so that it writes `md` and nothing else, or why there is
+    none. `skill_manage` takes only a name and resolves it itself (Hermes' private `_find_skill`):
+    the first directory it enumerates whose name, or whose path relative to the profile's
+    `skills/`, equals the name; a unique frontmatter name only when no directory matches. So:
+
+    - `md` must be a SKILL.md in the profile's `skills/` that its scanner enumerates: reached
+      without a symlink (the file included), outside the directories it skips;
+    - no other directory called `name` may exist in any of Hermes' skill roots (project dirs
+      included, every directory any supported Hermes may enumerate): Argus keys a skill by its
+      directory name, so two would also be one skill to it (its ledger, its pending writes);
+    - in a category (`skills/<cat>/<name>/`) the name given is that relative path, which only
+      `md`'s directory has; directly in `skills/` it is the bare name."""
+    local = Path(home) / "skills"
+    where = f"{md} is"
+    try:
+        rel = md.parent.relative_to(local)
+    except ValueError:
+        return None, f"{where} not in the profile's skills/ directory, where apply writes."
+    if (
+        not rel.parts
+        or md.is_symlink()
+        or _crosses_symlink(local, md.parent)
+        or os.path.realpath(md.parent) != os.path.join(os.path.realpath(local), *rel.parts)
+    ):
+        return None, f"{where} reached through a symlink, which apply does not follow."
+    if _scanner_skips(md):
+        return None, f"{where} in a directory Hermes may not scan for skills."
+    every = store.hermes_all_skill_roots(Path(home))
+    if every is None:
+        return None, "Hermes could not list the profile's skill directories."
+    others = sorted({str(p) for p in _dirs_named(name, every)} - {str(md)})
+    if others:
+        return None, f"{where} not the only directory called {name}: {', '.join(others)}."
+    return rel.as_posix(), None
+
+
 def _create(
     home: Path, pid: str, name: str, rule: str, dry_run: bool, deadline: float | None
 ) -> ApplyResult:
     kind = "proposal"
     try:
-        from tools import skill_manager_tool as smt
+        found, problem = _locate(home, name)
     except Exception as e:
         return result(
-            "failed", f"Hermes skill_manage unavailable ({e}); use the copied command", kind, pid
+            "failed", f"Hermes skill lookup unavailable ({e}); use the copied command", kind, pid
         )
-    if smt._find_skill(name):
+    if problem:
+        return result(
+            "refused",
+            f"proposal {pid} creates skill {name}, and Hermes cannot confirm that profile "
+            f"{store.profile_name(home)} has none: {problem} Use the copied command",
+            kind,
+            pid,
+        )
+    if found:
         return result(
             "refused",
             f"proposal {pid} creates skill {name}, which exists now in profile "
@@ -515,7 +706,7 @@ def _create(
         )
     if late := _late(deadline, kind, pid):
         return late
-    return _skill_call("create", name, kind, pid, content=content)
+    return _skill_call(home, "create", name, kind, pid, content=content)
 
 
 def proposal(home: Path, pid: str, dry_run: bool, deadline: float | None = None) -> ApplyResult:
@@ -560,13 +751,21 @@ def proposal(home: Path, pid: str, dry_run: bool, deadline: float | None = None)
             pid,
         )
     try:
-        from tools import skill_manager_tool as smt
+        target, problem = _locate(home, name)
     except Exception as e:
         return result(
-            "failed", f"Hermes skill_manage unavailable ({e}); use the copied command", kind, pid
+            "failed", f"Hermes skill lookup unavailable ({e}); use the copied command", kind, pid
         )
-    found = smt._find_skill(name)
-    if not found:
+    if problem:
+        # skill_manage would pick one of the candidates by its own rules: never patch a guess
+        return result(
+            "refused",
+            f"Hermes cannot resolve skill {name} in profile {store.profile_name(home)} to one "
+            f"file: {problem} Use the copied command",
+            kind,
+            pid,
+        )
+    if target is None:
         return result(
             "refused",
             f"skill {name} not found in profile {store.profile_name(home)}: it was removed or "
@@ -574,7 +773,31 @@ def proposal(home: Path, pid: str, dry_run: bool, deadline: float | None = None)
             kind,
             pid,
         )
-    target = Path(found["path"]) / "SKILL.md"
+    if target.name != "SKILL.md":
+        return result(
+            "refused",
+            f"skill {name} is a single-file skill ({target.name}): apply only patches SKILL.md; "
+            "use the copied command",
+            kind,
+            pid,
+        )
+    if file and store.skill_rel(home, target) != file:
+        return result(
+            "refused",
+            f"proposal {pid} was derived from {file}, but Hermes now resolves skill {name} to "
+            f"{target}. Re-run `hermes argus derive` for a fresh diff, or use the copied command",
+            kind,
+            pid,
+        )
+    writer, why = _writer_name(home, name, target)
+    if writer is None:
+        return result(
+            "refused",
+            f"apply cannot make skill_manage write the file it checks for skill {name}: {why} "
+            "Use the copied command",
+            kind,
+            pid,
+        )
     rel = _rel(str(target))
     try:
         content = target.read_text(encoding="utf-8-sig").replace("\r\n", "\n")
@@ -607,7 +830,9 @@ def proposal(home: Path, pid: str, dry_run: bool, deadline: float | None = None)
             kind,
             pid,
         )
-    if dup := _pending_duplicate(home, "patch", name, old_string=old, new_string=new):
+    if dup := _pending_duplicate(
+        home, "patch", name, old_string=old, new_string=new
+    ) or _pending_duplicate(home, "patch", writer, old_string=old, new_string=new):
         return result(
             "refused",
             f"this patch is already staged as pending write {dup}: approve it with "
@@ -627,7 +852,7 @@ def proposal(home: Path, pid: str, dry_run: bool, deadline: float | None = None)
         )
     if late := _late(deadline, kind, pid):
         return late
-    return _skill_call("patch", name, kind, pid, old=old, new=new)
+    return _skill_call(home, "patch", writer, kind, pid, expect=target, old=old, new=new)
 
 
 # ---------------------------------------------------------------- entry point

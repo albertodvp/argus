@@ -92,7 +92,8 @@ Each attempt (not `--dry-run`) is a row in `apply_log` (`outcome` applied | stag
 unknown, Hermes' message, the ledger entry it wrote, the pending id of a staged write); applied and
 staged ones also fill `executed_at`, `execution_result` and `ledger_entry_id` of the target's latest
 matching decision. `unknown`: the dashboard stopped waiting (the child refuses to start a write within
-5 s of its deadline). The export shows per target the latest success (`applied`: applied, or staged
+5 s of its deadline), or skill_manage reported a patch but no new ledger entry names the file apply
+checked (it wrote another file, or the ledger is off): the decision stays unexecuted. The export shows per target the latest success (`applied`: applied, or staged
 while `pending/skills/<id>.json` exists) and the latest attempt (`last_attempt`). A staged proposal
 whose pending write is gone was approved or rejected; the ledger does not name the pending id, so the
 export looks for the proposal's write (a `patch` whose `SKILL.md` gains its new text, or a `create`

@@ -60,10 +60,12 @@ backfilled (idle trigger and dashboard refresh included); on the others it first
 the tool outcomes and ledger entries since the last backfill, which keeps profiles without the
 plugin (no hooks there) current. Skills are found where Hermes finds them: the profile's `skills/`,
 then `skills.create_dir` and `skills.external_dirs`, as Hermes' `skill_search_dirs` lists them for
-that profile (trusted project skill dirs left out). Two limits come from Hermes: a trusted project's
-skill dir that the profile also lists in `external_dirs` or `create_dir` is left out while Argus
-runs inside that project, and an external dir created after the first lookup is seen only once
-`config.yaml` changes. A Hermes run in a
+that profile (trusted project skill dirs, which Hermes lists before `skills/`, left out). When the
+profile has no `skills/` directory but Hermes lists other roots, nothing marks where those end, so
+Argus reads no other skill directory and apply refuses. Two limits come from Hermes: a trusted
+project's skill dir that the profile also lists in `external_dirs` or `create_dir` is left out
+while Argus runs inside that project, and an external dir created after the first lookup is seen
+only once `config.yaml` changes. A Hermes run in a
 container or behind a wrapper needs that instance's own CLI in place of `hermes`.
 
 ## What Argus does on your machine
@@ -84,8 +86,8 @@ What a user should know before installing (catalog rule 13):
 - **Reads outside its own data, read-only.** Each profile's `state.db`, the curator ledger
   `skills/.curator_ledger.jsonl` and its blob store `.curator_backups/blobs/`, the `SKILL.md` files
   of the skill directories Hermes' `skill_search_dirs` lists for it (`skills/`, `skills.create_dir`,
-  `skills.external_dirs`; Argus does not parse `config.yaml` or use any value in it, Hermes reads
-  the profile's configuration to answer) and staged writes under `pending/skills/`. With `--all`, and always in the dashboard,
+  `skills.external_dirs`; Argus does not parse `config.yaml` itself, Hermes reads the profile's
+  configuration to answer) and staged writes under `pending/skills/`. With `--all`, and always in the dashboard,
   that is every profile of the install, including profiles that do not enable Argus. The dashboard
   tells whether a derive pass is running from the profiles' `derive.lock`, and whether Argus changed
   on disk from the files of its own directory.
@@ -104,12 +106,20 @@ What a user should know before installing (catalog rule 13):
   after that entry (Hermes refuses one outside the profile's home, e.g. in `skills.external_dirs`).
   An accepted proposal goes through `skill_manage(action="patch")`, which refuses a
   locked skill and, with `skills.write_approval` on, only stages the write for `/skills approve`;
-  apply refuses it when its rule or diff changed after the person accepted it, and when the skill's
+  apply refuses it when its rule or diff changed after the person accepted it, when Hermes now
+  resolves the skill to another file than the proposal was derived from, and when the skill's
   `SKILL.md` or directory is not writable here (a shared `skills.external_dirs` is often read-only:
   the dashboard marks those proposals read-only, to carry to wherever that skill is maintained).
-  Ledger actor: `user`. The dashboard's copy buttons give terminal commands with every value
-  shell-quoted.
-- **Credentials.** None read, stored or requested.
+  `skill_manage` takes only a name and finds the file itself, so apply writes only where that
+  name can lead to the file it checked: a `SKILL.md` in the profile's `skills/`, reached without a
+  symlink, outside the directories Hermes may not scan, and the only directory with the skill's
+  name in Hermes' skill roots (Argus keys a skill by that name); a skill in a category is named by
+  its path (`<category>/<skill>`). Anything else is refused. After a
+  patch, a new ledger entry must name the file apply checked; otherwise the outcome is `unknown`
+  (also with `skills.ledger` off), with the entry id when there is one. Ledger actor: `user`. The
+  dashboard's copy buttons give terminal commands with every value shell-quoted.
+- **Credentials.** Argus reads, stores and requests none. (Hermes reads the profile's configuration
+  when Argus asks it for the skill directories; Argus gets back paths only.)
 
 ## What runs where
 

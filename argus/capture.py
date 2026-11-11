@@ -295,7 +295,9 @@ def find_ledger_entries(
     lo = at - LEDGER_SLACK - (as_number(duration_ms) or 0) / 1000.0
     out: list[hermes_data.LedgerEntry] = []
     for e in _ledger_tail(home):
-        if _skill_key(e.get("skill")) != skill or not lo <= e["ts_epoch"] <= at + LEDGER_SLACK:
+        # the name the call gave, so `a/sk` and `b/sk` written in one turn stay apart
+        named = e.get("qualified") or e.get("skill")
+        if _skill_key(named) != skill or not lo <= e["ts_epoch"] <= at + LEDGER_SLACK:
             continue
         sid = (e.get("evidence") or {}).get("session_id")
         if sid and session_id and sid != session_id:

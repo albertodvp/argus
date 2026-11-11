@@ -164,7 +164,7 @@ create table if not exists apply_log (
   target_kind  text not null check (target_kind in ('skill_edit', 'proposal')),
   target_id    text not null,             -- ledger_entry_id or proposal id
   outcome      text not null check (outcome in ('applied', 'staged', 'refused', 'failed', 'unknown')),
-                                          -- unknown: the dashboard stopped waiting; check the ledger
+                                          -- unknown: the dashboard stopped waiting, or no ledger entry proves the file written; check the ledger
   message      text,                      -- Hermes' message, or why Argus refused
   ledger_entry text,                      -- ledger entry the apply created (the rollback or patch entry)
   pending_id   text,                      -- staged: <home>/pending/skills/<pending_id>.json

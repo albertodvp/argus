@@ -1,10 +1,3 @@
-from pathlib import Path
-from typing import TypedDict
-
-class _FoundSkill(TypedDict):
-    path: Path
-
-def _find_skill(name: str) -> _FoundSkill | None: ...
 def skill_manage(
     action: str,
     name: str,

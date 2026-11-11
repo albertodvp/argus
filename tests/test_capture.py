@@ -155,3 +155,18 @@ def test_a_later_call_on_the_same_skill_keeps_its_own_entry(home: Path) -> None:
         tool_name="skill_manage", args=flat, session_id="s1", tool_call_id="c2", status="ok"
     )
     assert linked(home) == [("e1", "c1", "hook"), ("e2", "c2", "hook")]
+
+
+def test_a_call_with_a_category_path_links_only_that_skills_entry(home: Path) -> None:
+    """Ledger entries read back as the directory name (`sk`), but the call named `a/sk`: its entry
+    links, and the namesake `b/sk` written in the same turn stays out."""
+    now = time.time()
+    write_ledger(home, [("e1", "a/sk", now - 1, "s1"), ("e2", "b/sk", now - 0.5, "s1")])
+    capture.post_tool_call(
+        tool_name="skill_manage",
+        args={"action": "patch", "name": "a/sk"},
+        session_id="s1",
+        tool_call_id="c1",
+        status="ok",
+    )
+    assert linked(home) == [("e1", "c1", "hook")]

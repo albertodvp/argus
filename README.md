@@ -130,8 +130,9 @@ flowchart TD
 | **The curator**: archives unused skills, merges them with `curator.consolidate: true`, never deletes on its own | idle, at most every 7 days | `curator` |
 | **A person**: `hermes curator rollback`, `hermes argus apply` | by hand | `user` |
 
-Counters decide *when*; the model decides *what* to save and whether the work went well. Every write
-lands in the curator ledger and can be rolled back. Details, with references into the Hermes source:
+Counters decide *when*; the model decides *what* to save and whether the work went well. With
+`skills.ledger` on (the default), every write lands in the curator ledger, and one inside the profile
+can be rolled back. Details, with references into the Hermes source:
 [docs/hermes-learning-loop.md](docs/hermes-learning-loop.md).
 
 ### What Argus adds

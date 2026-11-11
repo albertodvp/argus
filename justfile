@@ -19,6 +19,11 @@ typecheck-js:
 test: setup
     uv run --locked pytest
 
+# Apply and skill discovery against a real Hermes (its interpreter), in throw-away Hermes homes:
+# the cases where Argus' checks and Hermes' skill_manage could disagree about the file to write.
+integration python:
+    {{python}} tests/hermes_integration.py
+
 # Optional, needs a Hermes checkout with a .venv (verified on 0.22.7 and 0.23.0): mypy.stubtest runs
 # in a throw-away venv on the Hermes interpreter; nothing is installed into Hermes, and HOME and
 # HERMES_HOME are temporary.

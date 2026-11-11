@@ -385,12 +385,12 @@ def test_export_tells_an_approved_staged_apply_from_a_rejected_one(home: Path) -
     ):
         (blobs / sha).write_text(text, encoding="utf-8")
     when = datetime.fromtimestamp(now - 3600, UTC).isoformat()
+    kp, fp = str(kept / "SKILL.md"), str(home / "skills" / "fresh" / "SKILL.md")
     ledger = [
         {"id": "e1", "ts": when, "actor": "approver", "action": "patch", "skill": "kept",
-         "before": [{"path": "/h/skills/tools/kept/SKILL.md", "sha256": "b0"}],
-         "after": [{"path": "/h/skills/tools/kept/SKILL.md", "sha256": "a0"}]},
+         "before": [{"path": kp, "sha256": "b0"}], "after": [{"path": kp, "sha256": "a0"}]},
         {"id": "e2", "ts": when, "actor": "approver", "action": "create", "skill": "fresh",
-         "after": [{"path": "/h/skills/fresh/SKILL.md", "sha256": "c0"}]},
+         "after": [{"path": fp, "sha256": "c0"}]},
     ]  # fmt: skip
     hermes_data.ledger_path(home).write_text(
         "".join(json.dumps(x) + "\n" for x in ledger), encoding="utf-8"
