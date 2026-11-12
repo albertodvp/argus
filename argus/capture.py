@@ -20,7 +20,7 @@ from typing import Final, ParamSpec, TypeVar
 
 from pydantic import TypeAdapter, ValidationError
 
-from . import hermes_data, signals, store
+from . import hermes_data, hermes_internals, signals, store
 from .jsontypes import as_number
 
 log = logging.getLogger("hermes.plugins.argus")
@@ -46,15 +46,6 @@ _turn_start: dict[str, float] = {}  # turn_id -> pre_llm_call time
 _provenance: dict[tuple[object, str], object] = {}
 
 
-def _home() -> Path:
-    try:
-        from hermes_constants import get_hermes_home
-
-        return Path(get_hermes_home())
-    except Exception:
-        return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-
-
 def _remember(d: dict[K, V], key: K, value: V) -> None:
     with _lock:
         d.pop(key, None)
@@ -70,7 +61,7 @@ def _safe(fn: Callable[P, None]) -> Callable[P, None]:
             fn(*args, **kwargs)
         except Exception:
             log.warning("argus: hook %s failed", fn.__name__, exc_info=True)
-        return None
+        return
 
     return wrapped
 
@@ -164,7 +155,7 @@ def post_tool_call(
     if not tool_call_id or not tool_name:
         return
     now = time.time()
-    home = _home()
+    home = hermes_internals.hermes_home()
     sig = signals.tool_error(_text(result))
     if not sig and status and status != "ok":
         reason = error_message or error_type or status
@@ -206,7 +197,7 @@ def on_session_end(
     **kwargs: object,
 ) -> None:
     now = time.time()
-    home = _home()
+    home = hermes_internals.hermes_home()
     if turn_id and session_id:
         with _lock:
             started = _turn_start.pop(str(turn_id), None)
@@ -241,7 +232,7 @@ def on_skill_lifecycle(
         return
     _remember(_provenance, (session_id, skill), provenance)
     # lifecycle fired after the skill_manage post_tool_call: fill the provenance of that fresh row
-    store.writer(_home()).put(
+    store.writer(hermes_internals.hermes_home()).put(
         "update skill_edit set provenance = ? where session_id = ? and skill_name = ?"
         " and provenance is null and origin = 'hook' and ts >= ?",
         (provenance, session_id, skill, time.time() - 120),
@@ -258,7 +249,7 @@ def on_session_delete(
     if not ids:
         return
     ph = ",".join("?" * len(ids))
-    w = store.writer(_home())
+    w = store.writer(hermes_internals.hermes_home())
     for table in ("tool_outcome", "turn_outcome", "turn_intent", "run"):
         w.put(f"delete from {table} where session_id in ({ph})", tuple(ids))
     # the ledger entry and the skill change outlive the session: keep the edit and its review,
@@ -275,7 +266,7 @@ def _ledger_tail(home: Path) -> list[hermes_data.LedgerEntry]:
     path = hermes_data.ledger_path(home)
     if not path.exists():
         return []
-    with open(path, "rb") as f:
+    with path.open("rb") as f:
         f.seek(0, os.SEEK_END)
         size = f.tell()
         f.seek(max(0, size - LEDGER_TAIL))

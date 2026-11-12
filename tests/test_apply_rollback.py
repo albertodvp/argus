@@ -3,7 +3,6 @@ an edit changed since (by a newer ledger entry, outside the ledger, or by an ear
 refused without touching anything, and so is one without a current reject decision."""
 
 import hashlib
-import sys
 import time
 import types
 from contextvars import ContextVar, Token
@@ -11,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from argus import apply, store
+from argus import apply, hermes_internals, store
 from argus.dbtypes import APPLY_LOG_ROW, query_as
 
 Entry = dict[str, object]
@@ -53,9 +52,7 @@ class Ledger(types.ModuleType):
 @pytest.fixture()
 def ledger(monkeypatch: pytest.MonkeyPatch) -> Ledger:
     fake = Ledger()
-    # `from tools import skill_ledger` finds the submodule in sys.modules
-    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-    monkeypatch.setitem(sys.modules, "tools.skill_ledger", fake)
+    monkeypatch.setattr(hermes_internals, "SKILL_LEDGER", fake)
     return fake
 
 
@@ -116,7 +113,8 @@ def test_rejected_edit_is_rolled_back_as_the_user(home: Path, ledger: Ledger) ->
 def test_without_a_reject_decision_nothing_happens(home: Path, ledger: Ledger) -> None:
     decide(home, "keep")  # the latest decision wins
     r = apply.run(home, "skill_edit", "e1")
-    assert r["outcome"] == "refused" and "no current" in r["message"]
+    assert r["outcome"] == "refused"
+    assert "no current" in r["message"]
     assert ledger.rolled_back == []
 
 
@@ -149,7 +147,8 @@ def test_edit_changed_by_a_newer_entry_is_refused(home: Path, ledger: Ledger) ->
 def test_edit_changed_outside_the_ledger_is_refused(home: Path, ledger: Ledger) -> None:
     (home / "skills" / "k" / "SKILL.md").write_text("by hand\n", encoding="utf-8")
     r = apply.run(home, "skill_edit", "e1")
-    assert r["outcome"] == "refused" and "outside the ledger" in r["message"]
+    assert r["outcome"] == "refused"
+    assert "outside the ledger" in r["message"]
     assert ledger.rolled_back == []
 
 
@@ -160,12 +159,14 @@ def test_second_rollback_is_refused(home: Path, ledger: Ledger) -> None:
         before=[{"path": str(home / "skills" / "k" / "SKILL.md"), "sha256": sha("new\n")}]
     )
     r = apply.run(home, "skill_edit", "e1")
-    assert r["outcome"] == "refused" and "already rolled back" in r["message"]
+    assert r["outcome"] == "refused"
+    assert "already rolled back" in r["message"]
     assert ledger.rolled_back == [("e1", "user")]
 
 
 def test_entry_outside_the_profile_home_is_refused(home: Path, ledger: Ledger) -> None:
     ledger.entries[0]["after"] = [{"path": "/elsewhere/skills/k/SKILL.md", "sha256": sha("x")}]
     r = apply.run(home, "skill_edit", "e1")
-    assert r["outcome"] == "refused" and "outside this profile's home" in r["message"]
+    assert r["outcome"] == "refused"
+    assert "outside this profile's home" in r["message"]
     assert ledger.rolled_back == []

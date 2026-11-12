@@ -92,6 +92,8 @@ declare namespace Argus {
     ledger_entry: string | null;
     pending_id: string | null;
     at: number;
+    /** cli | dashboard | auto (the auto_apply policy), ` --force` appended when forced */
+    by: string | null;
     /** set on a proposal's `applied` whose ledger entry was rolled back since: the rollback entry */
     rolled_back?: string;
   }
@@ -488,6 +490,8 @@ declare namespace Argus {
       message?: string | null;
       ledger_entry?: string | null;
       rolled_back?: string;
+      /** who ran the apply; `auto` for the auto_apply policy */
+      by?: string | null;
     }
 
     /** A Learning or Proposal: what applyState reads of the export's apply state. */

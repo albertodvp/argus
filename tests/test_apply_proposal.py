@@ -4,7 +4,6 @@ again, and so is a skill in a read-only directory (a shared skills.external_dirs
 
 import json
 import os
-import sys
 import time
 import types
 from pathlib import Path
@@ -12,7 +11,9 @@ from typing import Final
 
 import pytest
 
-from argus import apply, store
+from argus import apply, export, hermes_internals, store
+from argus.dbtypes import ProposalRow
+from argus.exporttypes import ApplyAttempt
 
 
 def _accepted(home: Path, shown_diff: str, current_diff: str) -> None:
@@ -88,10 +89,9 @@ def _hermes(
         return "{}"
 
     smt.skill_manage = manage  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "hermes_constants", constants)
-    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-    monkeypatch.setitem(sys.modules, "tools.skills_tool", st)
-    monkeypatch.setitem(sys.modules, "tools.skill_manager_tool", smt)
+    monkeypatch.setattr(hermes_internals, "CONSTANTS", constants)
+    monkeypatch.setattr(hermes_internals, "SKILLS_TOOL", st)
+    monkeypatch.setattr(hermes_internals, "SKILL_MANAGER", smt)
 
 
 # locate_skill's JSON answers (tools/skills_tool.py, unchanged from 0.22.5 to 0.23.1)
@@ -115,7 +115,8 @@ def test_a_name_hermes_cannot_resolve_to_one_skill_is_refused(
     _hermes(monkeypatch, tmp_path / "home", AMBIGUOUS, called)
     r = apply.run(tmp_path / "home", "proposal", "p1")
     assert r["outcome"] == "refused"
-    assert "cannot resolve skill sk" in r["message"] and "refusing to guess" in r["message"]
+    assert "cannot resolve skill sk" in r["message"]
+    assert "refusing to guess" in r["message"]
     assert called == []
 
 
@@ -125,7 +126,8 @@ def test_a_skill_that_is_gone_is_refused(tmp_path: Path, monkeypatch: pytest.Mon
     called: list[str] = []
     _hermes(monkeypatch, tmp_path / "home", NOT_FOUND, called)
     r = apply.run(tmp_path / "home", "proposal", "p1")
-    assert r["outcome"] == "refused" and "not found" in r["message"]
+    assert r["outcome"] == "refused"
+    assert "not found" in r["message"]
     assert called == []
 
 
@@ -181,7 +183,9 @@ def _manage_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
         calls.append((action, name))
         return '{"success": true}'
 
-    sys.modules["tools.skill_manager_tool"].skill_manage = manage  # type: ignore[attr-defined]
+    smt = types.ModuleType("tools.skill_manager_tool")
+    smt.skill_manage = manage  # type: ignore[attr-defined]
+    monkeypatch.setattr(hermes_internals, "SKILL_MANAGER", smt)
     sl = types.ModuleType("tools.skill_ledger")
 
     def entries(skill: str | None = None, limit: int | None = None) -> list[dict[str, object]]:
@@ -193,7 +197,7 @@ def _manage_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     sl.list_entries = entries  # type: ignore[attr-defined]
     sl.set_ledger_actor = actor  # type: ignore[attr-defined]
     sl.reset_ledger_actor = actor  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "tools.skill_ledger", sl)
+    monkeypatch.setattr(hermes_internals, "SKILL_LEDGER", sl)
     return calls
 
 
@@ -214,7 +218,8 @@ def test_a_read_only_skill_is_refused_before_hermes_is_asked(
     finally:
         md.parent.chmod(0o755)
         md.chmod(0o644)
-    assert r["outcome"] == "refused" and "read-only" in r["message"]
+    assert r["outcome"] == "refused"
+    assert "read-only" in r["message"]
     assert called == []
 
 
@@ -247,7 +252,8 @@ def test_a_namesake_directory_anywhere_refuses_the_apply(
     called: list[str] = []
     _hermes(monkeypatch, home, md, called)
     r = apply.run(home, "proposal", "p1")
-    assert r["outcome"] == "refused" and str(other) in r["message"]
+    assert r["outcome"] == "refused"
+    assert str(other) in r["message"]
     assert called == []
 
 
@@ -270,7 +276,8 @@ def test_a_patch_staged_under_the_path_name_is_not_staged_twice(
     called: list[str] = []
     _hermes(monkeypatch, home, md, called)
     r = apply.run(home, "proposal", "p1")
-    assert r["outcome"] == "refused" and "w1" in r["message"], r["message"]
+    assert r["outcome"] == "refused", r["message"]
+    assert "w1" in r["message"], r["message"]
     assert called == []
 
 
@@ -286,7 +293,8 @@ def test_a_top_level_skill_needs_a_unique_directory_name(
     called: list[str] = []
     _hermes(monkeypatch, home, md, called, roots=[(1, home / "skills"), (3, ext)])
     r = apply.run(home, "proposal", "p1")
-    assert r["outcome"] == "refused" and str(other) in r["message"]
+    assert r["outcome"] == "refused"
+    assert str(other) in r["message"]
     assert called == []
 
 
@@ -303,7 +311,8 @@ def test_a_project_dir_counts_for_the_unique_name(
     called: list[str] = []
     _hermes(monkeypatch, home, md, called, roots=[(0, project), (1, home / "skills")])
     r = apply.run(home, "proposal", "p1")
-    assert r["outcome"] == "refused" and "not the only directory" in r["message"]
+    assert r["outcome"] == "refused"
+    assert "not the only directory" in r["message"]
     assert called == []
 
 
@@ -340,7 +349,8 @@ def test_a_skill_skill_manage_cannot_reach_by_path_is_refused(
     called: list[str] = []
     _hermes(monkeypatch, home, md, called, roots=roots)
     r = apply.run(home, "proposal", "p1")
-    assert r["outcome"] == "refused" and "cannot make skill_manage write" in r["message"]
+    assert r["outcome"] == "refused"
+    assert "cannot make skill_manage write" in r["message"]
     assert called == []
 
 
@@ -372,7 +382,8 @@ def test_a_symlink_to_a_namesake_is_followed_when_counting(
     called: list[str] = []
     _hermes(monkeypatch, home, md, called)
     r = apply.run(home, "proposal", "p1")
-    assert r["outcome"] == "refused" and str(deep) in r["message"]
+    assert r["outcome"] == "refused"
+    assert str(deep) in r["message"]
 
 
 def test_when_hermes_cannot_list_the_skill_dirs_nothing_is_created(
@@ -386,9 +397,10 @@ def test_when_hermes_cannot_list_the_skill_dirs_nothing_is_created(
     def broken() -> tuple[list[tuple[int, Path]], Path]:
         raise RuntimeError("config unreadable")
 
-    sys.modules["tools.skills_tool"].skill_search_dirs = broken  # type: ignore[attr-defined]
+    monkeypatch.setattr(hermes_internals.SKILLS_TOOL, "skill_search_dirs", broken)
     r = apply.run(home, "proposal", "p2", dry_run=True)
-    assert r["outcome"] == "refused" and "could not list" in r["message"]
+    assert r["outcome"] == "refused"
+    assert "could not list" in r["message"]
     assert called == []
 
 
@@ -402,7 +414,8 @@ def test_a_new_skill_is_refused_when_a_directory_has_its_name(
     called: list[str] = []
     _hermes(monkeypatch, home, NOT_FOUND, called)
     r = apply.run(home, "proposal", "p2", dry_run=True)
-    assert r["outcome"] == "refused" and "exists" in r["message"]
+    assert r["outcome"] == "refused"
+    assert "exists" in r["message"]
     assert called == []
 
 
@@ -423,7 +436,8 @@ def test_a_skill_that_moved_since_the_proposal_is_refused(
     called: list[str] = []
     _hermes(monkeypatch, home, md, called)
     r = apply.run(home, "proposal", "p1")
-    assert r["outcome"] == "refused" and "was derived from sk/SKILL.md" in r["message"]
+    assert r["outcome"] == "refused"
+    assert "was derived from sk/SKILL.md" in r["message"]
     assert called == []
 
 
@@ -432,10 +446,6 @@ def test_an_approval_in_another_directory_of_the_name_is_not_this_proposals(
 ) -> None:
     """A staged patch of skills/sk was rejected; an equivalent write to skills/b/sk (whose path
     also ends in sk/SKILL.md) or a/sk later is not its approval: the ledger reads all as sk."""
-    from argus import export
-    from argus.dbtypes import ProposalRow
-    from argus.exporttypes import ApplyAttempt
-
     skills = tmp_path / "skills"
     pr: ProposalRow = {
         "id": "p1",
@@ -455,6 +465,7 @@ def test_an_approval_in_another_directory_of_the_name_is_not_this_proposals(
         "ledger_entry": None,
         "pending_id": "w1",
         "at": 1.0,
+        "by": "dashboard",
     }
     before, after = "# sk\n\nStep one.\n", "# sk\n\nStep one.\nCheck the lock first.\n"
     target = os.path.realpath(skills / "sk" / "SKILL.md")
@@ -463,4 +474,5 @@ def test_an_approval_in_another_directory_of_the_name_is_not_this_proposals(
     mine = ("e3", "patch", 3.0, str(skills / "sk" / "SKILL.md"), before, after)
     assert export._approved(pr, staged, [nested, other], target) is None
     got = export._approved(pr, staged, [nested, other, mine], target)
-    assert got is not None and got["ledger_entry"] == "e3"
+    assert got is not None
+    assert got["ledger_entry"] == "e3"
