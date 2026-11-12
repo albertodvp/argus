@@ -4,7 +4,8 @@ Argus reads a Hermes agent by **intents** instead of sessions and lets a person 
 of what it learns. It groups the agent's turns into intents (one goal, possibly over many turns,
 sessions and days), shows which skills each intent read and taught, flags skill edits Hermes applied
 without evidence and proposes edits of its own. A person keeps or rejects each edit and accepts or
-dismisses each proposal; nothing changes a skill without that.
+dismisses each proposal; nothing changes a skill without that, unless the profile opts in to
+auto-apply for the few best-backed additive proposals ([README](../README.md#auto-apply-opt-in)).
 
 ![Intents × skills in the Hermes dashboard](../assets/showcase/02-matrix.png)
 
@@ -42,6 +43,7 @@ hermes argus derive              # model passes on the `auxiliary.argus` slot (`
 hermes argus status              # rows per profile, last backfill and derive, history window, next derive's calls
 hermes argus export --out data.js
 hermes argus apply --proposal <id> [--dry-run]   # carry out an accepted proposal (or --rollback <entry>)
+hermes argus auto-apply                          # what the opt-in auto_apply policy would apply now (writes nothing)
 ```
 
 `-p <profile>` selects the profile, `--all` runs backfill/derive on every profile of the install.
@@ -101,7 +103,12 @@ What a user should know before installing (catalog rule 13):
   Python and `HERMES_HOME` set to the decision's profile, stopped after 45 seconds. These are the
   only processes Argus starts, each from an argument list, never through a shell.
 - **Skill writes.** Only after a person decides and then clicks apply (the confirmation shows the
-  lines it inserts) or runs `hermes argus apply`. A rejected edit is undone with Hermes'
+  lines it inserts) or runs `hermes argus apply`; or, only in a profile whose setting `auto_apply`
+  is `true` (off by default), at the end of a derive pass of that profile, for the few proposals
+  the policy allows ([README](../README.md#auto-apply-opt-in)): high confidence, 2+ intents, lines
+  only added to an existing skill, a lesson nobody answered yet, at most `auto_apply_per_week` (3)
+  in 7 days, never again on a skill where a change was rolled back since. Those go through the
+  same apply and checks below, recorded as decided and applied by `auto`. A rejected edit is undone with Hermes'
   `rollback_entry`, the same restore as `hermes curator rollback`, refused when the file changed
   after that entry (Hermes refuses one outside the profile's home, e.g. in `skills.external_dirs`).
   An accepted proposal goes through `skill_manage(action="patch")`, which refuses a
@@ -132,6 +139,8 @@ What a user should know before installing (catalog rule 13):
 | `store.py` | `<home>/plugin-data/argus/data.db` (schema `schema.sql`), write queue |
 | `apply.py` | `hermes argus apply` and the dashboard's apply button: `rollback_entry` / `skill_manage` patch or create (new skill) as ledger actor `user`, checks first (current decision, no later change, context unchanged, rule not yet present), one row per attempt in `apply_log` |
 | `apply_child.py` | the dashboard's apply process: `apply.run` with HERMES_HOME = the decision's profile, so it works in profiles that do not enable the plugin |
+| `auto.py` | the opt-in auto-apply policy, run at the end of derive in the profile whose setting enables it |
+| `hermes_internals.py` | the only module that imports Hermes (`hermes_constants`, `tools.skills_tool`, `tools.skill_ledger`, `tools.skill_manager_tool`), each guarded: what is missing fails where it is called, never at plugin load |
 
 After a turn, when the agent has been idle `idle_minutes` (default 10) and no pass ran for
 `interval_minutes` (default 60), a detached `hermes argus derive --quiet` starts (one at a time,

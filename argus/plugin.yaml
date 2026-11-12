@@ -1,5 +1,5 @@
 name: argus
-version: 0.1.1
+version: 0.1.2
 description: "Argus reads a Hermes agent by intents instead of sessions and reviews what it learns: skill edits made without evidence and the skill edits it proposes, in a dashboard tab and `hermes argus`."
 author: albertodvp
 requires_hermes: ">=0.22.5"
@@ -23,3 +23,11 @@ config_schema:
     type: int
     default: 30
     description: "History window (days) a profile's first `hermes argus backfill` sets when --since is not given; derive and the dashboard read only sessions active in it. Later changes need `backfill --since DAYS`, which widens the window, never narrows it (0 = no window from this setting; `--since 0` asks for the whole history)."
+  auto_apply:
+    type: bool
+    default: false
+    description: "Opt-in. When true, after each derive pass in this profile Argus accepts and applies, as a person's apply would, the proposals of the latest pass that are high confidence, cite 2+ intents and only add lines to an existing skill, skipping lessons you already answered, never again on a skill where you rolled a change back since. Each is marked `auto` in the dashboard, with its undo."
+  auto_apply_per_week:
+    type: int
+    default: 3
+    description: "Most proposals auto_apply applies in any 7 days (0 = none)."

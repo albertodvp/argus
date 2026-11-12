@@ -1,8 +1,7 @@
 """Plugin storage: one SQLite file per Hermes profile at <home>/plugin-data/argus/data.db.
 
-Free of Hermes imports at module level, so the dashboard and the CLI can import it standalone
-(the profile's skill directories come from Hermes' skill_search_dirs, imported lazily when
-present).
+The profile's skill directories come from Hermes' skill_search_dirs, through
+`argus.hermes_internals`; without Hermes, only the profile's `skills/`.
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, TypeAlias, TypeVar, overload
 
+from . import hermes_internals
 from .dbtypes import PROPOSAL_ROW, SQLITE_ROW, count, query_as, query_one
 
 T = TypeVar("T")
@@ -182,20 +182,12 @@ def _hermes_search_dirs(home: Path) -> tuple[list[tuple[int, Path]], Path] | Non
     the Hermes home so one process can read every profile. None when Hermes is not importable or
     fails."""
     try:
-        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-        from tools.skills_tool import skill_search_dirs
-    except Exception:
+        return hermes_internals.skill_search_dirs(home)
+    except hermes_internals.HermesUnavailableError:
         return None
-    try:
-        tok = set_hermes_home_override(str(home))
-        try:
-            roots, active = skill_search_dirs()
-        finally:
-            reset_hermes_home_override(tok)
     except Exception:
         log.debug("argus: skill_search_dirs failed for %s", home, exc_info=True)
         return None
-    return [(t, Path(d)) for t, d in roots], Path(active)
 
 
 def hermes_all_skill_roots(home: Path) -> list[tuple[int, Path]] | None:

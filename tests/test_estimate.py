@@ -159,7 +159,8 @@ def test_ledger_entries_after_the_backfill_count_as_unread(home: Path) -> None:
     with hermes_data.ledger_path(home).open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
     est = derive.estimate(home)
-    assert est is not None and est["unread"] == 1
+    assert est is not None
+    assert est["unread"] == 1
     assert est["most"] >= est["calls"] + 1
 
 

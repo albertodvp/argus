@@ -53,7 +53,8 @@ def test_bad_decisions_are_refused(
 ) -> None:
     body: object = [VALID] if change is None else {**VALID, **change}
     code, out = plugin_api._decide(body)
-    assert code == 400 and error in str(out)
+    assert code == 400
+    assert error in str(out)
     assert decisions(home) == 0
 
 
@@ -61,11 +62,13 @@ def test_decision_is_recorded_and_cleared(home: Path) -> None:
     assert plugin_api._decide(VALID)[0] == 200
     assert decisions(home) == 1
     code, _out = plugin_api._decide({**VALID, "action": "clear", "snapshot": None})
-    assert code == 200 and decisions(home) == 0
+    assert code == 200
+    assert decisions(home) == 0
 
 
 def test_apply_needs_the_matching_decision(home: Path) -> None:
     body = {"target_kind": "proposal", "target_id": "p1", "profile": "default"}
     code, out = plugin_api._apply(body)
-    assert code == 400 and 'no current "accept" decision' in str(out)
+    assert code == 400
+    assert 'no current "accept" decision' in str(out)
     assert plugin_api._apply("x")[0] == 400

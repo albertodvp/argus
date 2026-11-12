@@ -3,14 +3,13 @@
 that profile. A skill kept in an external directory is a skill of the profile: proposals can name
 it, and it is not taken for one removed outside Hermes. Argus never reads config.yaml itself."""
 
-import sys
 import types
 from contextvars import ContextVar, Token
 from pathlib import Path
 
 import pytest
 
-from argus import store
+from argus import hermes_internals, store
 
 PROJECT, LOCAL, CREATE_DIR, EXTERNAL = range(4)  # Hermes' agent.skill_utils tiers
 
@@ -45,9 +44,8 @@ def hermes(monkeypatch: pytest.MonkeyPatch) -> dict[Path, list[tuple[int, Path]]
     constants.reset_hermes_home_override = reset_hermes_home_override  # type: ignore[attr-defined]
     skills_tool = types.ModuleType("tools.skills_tool")
     skills_tool.skill_search_dirs = skill_search_dirs  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "hermes_constants", constants)
-    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-    monkeypatch.setitem(sys.modules, "tools.skills_tool", skills_tool)
+    monkeypatch.setattr(hermes_internals, "CONSTANTS", constants)
+    monkeypatch.setattr(hermes_internals, "SKILLS_TOOL", skills_tool)
     return roots
 
 
@@ -133,7 +131,7 @@ def test_a_missing_dir_listed_by_hermes_is_skipped(
 def test_without_hermes_only_the_profile_skills(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setitem(sys.modules, "tools.skills_tool", None)  # import fails
+    monkeypatch.setattr(hermes_internals, "SKILLS_TOOL", None)  # import failed
     home = tmp_path / "home"
     own = _skill(home / "skills", "c", "s")
     assert store.skill_search_roots(home) == []

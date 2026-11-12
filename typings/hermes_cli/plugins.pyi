@@ -6,11 +6,11 @@ from agent.plugin_llm import PluginLlm
 from hermes_cli.plugins_ledger import PluginRegistration as PluginRegistration
 
 class _HookCallback(Protocol):
-    # plugins_dispatch: callback(**payload)
+    # plugins_dispatch calls it with the hook payload as keyword arguments
     def __call__(self, **kwargs: object) -> object: ...
 
 class _CommandHandler(Protocol):
-    # plugin_command_dispatch.invoke_plugin_command: handler(raw_args, **context)
+    # plugin_command_dispatch.invoke_plugin_command passes the raw arguments, then the context
     def __call__(self, raw_args: str, /, **context: object) -> object: ...
 
 class PluginContext:
