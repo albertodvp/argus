@@ -673,16 +673,18 @@ function changeRow(hk, c) {
           <button class="btn rej ${dec === 'dismiss' ? 'on' : ''}" data-pdec="dismiss" data-id="${esc(p.id)}" data-prof="${esc(p.profile)}">dismiss</button></div>`}</div></details>`;
   }
   const e = c.e, dec = decisions[ekey(e.profile, e.id)], L = lineage(m, e), fp = fromProposal(m, e);
+  // written by the auto_apply policy: Hermes records actor user, the only one a plugin can write as
+  const fauto = !!fp && applyState('proposal', fp.profile, fp.id, fp).succ?.by === 'auto';
   /** @type {(i: Argus.App.Intent) => string} */
   const ichip = i => `<a class="chip" href="#/${upart(hk)}/intents/${upart(i.id)}"><span class="dot s-${tok(i.status)}"></span>${esc(i.title)}</a>`;
   const rule = c.rule || fp?.rule || '';
   const from = fp ? `<span class="pp">proposal ${esc(fp.id)}</span> ${(fp.intents || []).map(id => m.I[id]).filter(i => i !== undefined).map(ichip).join('')}`
     : L.src ? `${ichip(L.src)} <span class="dim">${WHO[L.src.who]}</span>` : '<span class="dim">no intent</span>';
   return `<details class="ch hermes ${dec ? 'd-' + tok(dec) : ''}" id="e-${esc(e.id)}" data-k="${esc(k)}" ${isOpen(k)}><summary>
-    <span class="cdot" style="background:${fp ? '#c58cff' : evColor(c.ev)}"></span><span class="cw">${when(c.ts)}</span><span class="ctags">${fp ? '<span class="tag k-proposal" data-tip="this edit applied a proposal of this plugin, accepted from the dashboard or the CLI">from proposal</span>' : evTag(e)}${applyTag('skill_edit', e.profile, e.entry, e)}</span><span class="crule">${clip(rule, 60)}</span>
+    <span class="cdot" style="background:${fp ? '#c58cff' : evColor(c.ev)}"></span><span class="cw">${when(c.ts)}</span><span class="ctags">${fp ? `<span class="tag k-proposal" data-tip="${fauto ? 'this edit applied a proposal of this plugin, accepted and applied by the auto_apply policy' : 'this edit applied a proposal of this plugin, accepted from the dashboard or the CLI'}">${fauto ? 'auto-applied proposal' : 'from proposal'}</span>` : evTag(e)}${applyTag('skill_edit', e.profile, e.entry, e)}</span><span class="crule">${clip(rule, 60)}</span>
     <span class="cu ${L.leak ? 'w' : ''}" data-tip="${esc(L.ids.length ? `read afterwards by ${pl(L.ids.length, 'intent', 'intents')} in ${pl(L.after.length, 'run', 'runs')}${L.leak ? '\nfrom an automated test' : ''}` : 'not read again after this edit')}">${L.ids.length ? `↳ ${L.ids.length}` : ''}</span><span class="cd"><span class="add">+${c.plus}</span> <span class="del">−${c.minus}</span></span></summary>
     <div class="cb">${c.why || fp?.why ? `<div class="p">${esc(c.why || fp?.why || '')}</div>` : ''}
-      <div class="lin"><span class="lk">by</span>${esc(c.who)}${ACTOR_TIP[String(e.writer)] ? ` <span class="dim">${esc(ACTOR_TIP[String(e.writer)])}</span>` : ''}</div>${applyLine('skill_edit', e.profile, e.entry, e)}
+      <div class="lin"><span class="lk">by</span>${fauto ? 'Argus auto_apply policy <span class="dim">(ledger actor user)</span>' : esc(c.who)}${fauto ? '' : ACTOR_TIP[String(e.writer)] ? ` <span class="dim">${esc(ACTOR_TIP[String(e.writer)])}</span>` : ''}</div>${applyLine('skill_edit', e.profile, e.entry, e)}
       <div class="lin"><span class="lk">from</span>${from}</div>
       <div class="lin"><span class="lk">read after</span>${L.ids.length ? `<span>${pl(L.after.length, 'run', 'runs')} · <span class="add">${L.ok} met</span>${L.ko ? ` · <span class="del">${L.ko} failed</span>` : ''}</span> ${L.ids.slice(0, 4).map(id => ichip(must(m.I[id]))).join('')}${L.ids.length > 4 ? `<span class="dim">+${L.ids.length - 4}</span>` : ''}` : '<span class="dim">not yet</span>'}</div>
       ${L.leak ? '<div class="lin w"><span class="lk">note</span>came from an automated test, now read by team or user intents</div>' : ''}
@@ -692,10 +694,12 @@ function changeRow(hk, c) {
         <button class="btn rej ${dec === 'reject' ? 'on' : ''}" data-dec="reject" data-id="${esc(e.id)}" data-prof="${esc(e.profile)}" data-tip="adds a rollback to the dock; nothing runs until apply">reject</button>
 </div></div></details>`;
 }
-/** The proposal this edit carried out: an applied proposal whose ledger entry is this edit's.
+/** The proposal this edit carried out: a proposal whose latest successful apply wrote this edit's ledger entry,
+ * rolled back since or not (a rolled-back one is listed with the proposals again).
  * @param {Argus.App.Model} m @param {Argus.Learning} e @returns {Argus.Proposal | undefined} */
 function fromProposal(m, e) {
-  return m.h.carried.find(p => p.profile === e.profile && applyState('proposal', p.profile, p.id, p).succ?.ledger_entry === e.entry);
+  return [...m.h.carried, ...m.h.proposals || [], ...m.h.obsolete || []]
+    .find(p => p.profile === e.profile && applyState('proposal', p.profile, p.id, p).succ?.ledger_entry === e.entry);
 }
 /** @param {string} hk @param {string | undefined} key @param {string | undefined} mode */
 function viewSkills(hk, key, mode) {
@@ -829,18 +833,25 @@ function applyState(kind, prof, id, item) {
 function carried(kind, prof, id, item) { const s = applyState(kind, prof, id, item).succ; return !!s && !s.rolled_back; }
 /** @type {Record<Argus.DecisionKind, string>} */
 const APPLIED = { skill_edit: 'rolled back', proposal: 'applied' };
+// an apply run by the auto_apply policy (apply_log.applied_by = 'auto'), not by a person
+/** @param {Argus.App.ApplyView} a */
+const isAuto = a => a.by === 'auto';
+/** @param {Argus.DecisionKind} kind @param {Argus.App.ApplyView} a */
+const appliedWord = (kind, a) => (isAuto(a) ? 'auto-' : '') + (a.outcome === 'staged' ? 'staged' : APPLIED[kind]);
+/** @param {Argus.App.ApplyView} a @param {string} prof */
+const autoNote = (a, prof) => isAuto(a) ? `applied by the auto_apply policy, not a person${a.ledger_entry && !a.rolled_back ? `; undo: reject ledger entry ${a.ledger_entry} or ${hermesFor(prof)} curator rollback ${shq(a.ledger_entry)}` : ''}` : '';
 /** @param {Argus.DecisionKind} kind @param {string} prof @param {string} id @param {Argus.App.Applicable} item */
 function applyTag(kind, prof, id, item) {
   const a = applyState(kind, prof, id, item).succ;
   if (!a) return '';
   if (a.rolled_back) return `<span class="tag t-unrev" data-tip="${esc(`applied as ledger entry ${a.ledger_entry}, rolled back by ${a.rolled_back}`)}">rolled back</span>`;
-  return `<span class="tag t-${tok(a.outcome)}" data-tip="${esc(cut([a.ledger_entry ? `ledger entry ${a.ledger_entry}` : '', a.message || ''].filter(Boolean).join(' · '), 80))}">${a.outcome === 'staged' ? 'staged' : APPLIED[kind]}</span>`;
+  return `<span class="tag t-${tok(a.outcome)}" data-tip="${esc(cut([isAuto(a) ? 'auto_apply policy' : '', a.ledger_entry ? `ledger entry ${a.ledger_entry}` : '', a.message || ''].filter(Boolean).join(' · '), 80))}">${appliedWord(kind, a)}</span>`;
 }
 /** The apply result in full, for the opened change row (the tag's tooltip is cut). @param {Argus.DecisionKind} kind @param {string} prof @param {string} id @param {Argus.App.Applicable} item */
 function applyLine(kind, prof, id, item) {
   const a = applyState(kind, prof, id, item).succ;
   if (!a) return '';
-  return `<div class="lin"><span class="lk">apply</span>${esc([a.rolled_back ? `rolled back by ${a.rolled_back}` : a.outcome, a.ledger_entry ? `ledger entry ${a.ledger_entry}` : '', a.message || ''].filter(Boolean).join(' · '))}</div>`;
+  return `<div class="lin"><span class="lk">apply</span>${esc([a.rolled_back ? `rolled back by ${a.rolled_back}` : a.outcome, autoNote(a, prof), a.ledger_entry ? `ledger entry ${a.ledger_entry}` : '', a.message || ''].filter(Boolean).join(' · '))}</div>`;
 }
 // the message's first 80 characters on hover; the dock row's ▸ shows it whole
 /** @param {Argus.DecisionKind} kind @param {Argus.App.ApplyView} a */
@@ -848,7 +859,7 @@ function outcomeHtml(kind, a) {
   const tip = `data-tip="${esc(cut(a.message || '', 80))}"`;
   if (a.outcome === 'running') return '<span class="dim">applying…</span>';
   if (a.rolled_back) return `<span class="dim" ${tip}>applied as ${esc(a.ledger_entry)}, rolled back by ${esc(a.rolled_back)}</span>`;
-  if (a.outcome === 'applied') return `<span class="add" ${tip}>${APPLIED[kind]} ✓</span>${a.ledger_entry ? ` <span class="dim">ledger ${esc(a.ledger_entry)}</span>` : ''}`;
+  if (a.outcome === 'applied') return `<span class="add" ${tip}>${appliedWord(kind, a)} ✓</span>${a.ledger_entry ? ` <span class="dim">ledger ${esc(a.ledger_entry)}</span>` : ''}`;
   if (a.outcome === 'staged') return `<span class="w" ${tip}>staged: approve with /skills approve</span>`;
   return `<span class="e" ${tip}>${esc(a.outcome)}: ${esc(cut(a.message || '', 80))}</span>`;
 }

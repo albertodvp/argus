@@ -76,7 +76,7 @@ def _mod(name: str) -> types.ModuleType:
 if TYPE_CHECKING:
     # mypy reads the plugin modules themselves; at run time they come from _mod
     from argus import apply as apply_mod
-    from argus import cli, dbtypes, export, jsontypes, store
+    from argus import cli, dbtypes, export, hermes_internals, jsontypes, store
     from argus.apply import Outcome
     from argus.exporttypes import (
         ApplyBody,
@@ -93,8 +93,9 @@ if TYPE_CHECKING:
     )
     from argus.jsontypes import JsonObject
 else:
-    apply_mod, cli, dbtypes, export, jsontypes, store = (
-        _mod(n) for n in ("apply", "cli", "dbtypes", "export", "jsontypes", "store")
+    apply_mod, cli, dbtypes, export, hermes_internals, jsontypes, store = (
+        _mod(n)
+        for n in ("apply", "cli", "dbtypes", "export", "hermes_internals", "jsontypes", "store")
     )
 
 router = APIRouter()
@@ -103,19 +104,18 @@ router = APIRouter()
 def _root() -> Path:
     """Install root (the default profile's home) of the HERMES_HOME the dashboard was launched
     with."""
-    from hermes_constants import get_hermes_home
-
-    return store.root_of(Path(get_hermes_home()))
+    return store.root_of(hermes_internals.hermes_home())
 
 
-_refresh: subprocess.Popen[bytes] | None = None
-"""The derive this dashboard started last: running from the spawn on, before it takes its locks."""
+_refresh: list[subprocess.Popen[bytes]] = []
+"""The derive this dashboard started last (at most one): running from the spawn on, before it
+takes its locks."""
 
 
 def _derive_running() -> bool:
     """A derive of this install is running: the one refresh started, or any holding a profile's
     derive lock (idle trigger, CLI). Works wherever flock does, and sees no other install."""
-    if _refresh is not None and _refresh.poll() is None:
+    if _refresh and _refresh[-1].poll() is None:
         return True
     return any(cli.lock_held(home) for home in store.profile_homes(_root()).values())
 
@@ -294,11 +294,14 @@ def _apply(raw: object) -> tuple[int, ErrorBody | ApplyBody]:
         conn.close()
     if current != need:
         return 400, {"error": f'{kind} {tid} has no current "{need}" decision in profile {prof}'}
+    # where this process imports Hermes from: the gateway's interpreter finds hermes_cli/tools
+    # only through its launcher's sys.path, so the child gets it on PYTHONPATH
     spec = importlib.util.find_spec("hermes_cli")
     repo = str(Path(spec.origin).parent.parent) if spec and spec.origin else ""
+    path = os.pathsep.join(p for p in (repo, os.environ.get("PYTHONPATH", "")) if p)
     # the child changes nothing after deadline - MARGIN
     deadline = time.time() + APPLY_TIMEOUT - apply_mod.MARGIN
-    cmd = [sys.executable, str(_PKG_DIR / "apply_child.py"), repo, kind, tid, f"{deadline:.3f}"]
+    cmd = [sys.executable, str(_PKG_DIR / "apply_child.py"), kind, tid, f"{deadline:.3f}"]
     # out: the child's JSON result; it logged the attempt in apply_log itself
     out: JsonObject | None = None
     outcome: Outcome = "failed"
@@ -310,8 +313,9 @@ def _apply(raw: object) -> tuple[int, ErrorBody | ApplyBody]:
             capture_output=True,
             text=True,
             timeout=APPLY_TIMEOUT,
-            env={**os.environ, "HERMES_HOME": str(homes[prof])},
+            env={**os.environ, "HERMES_HOME": str(homes[prof]), "PYTHONPATH": path},
             cwd=str(homes[prof]),
+            check=False,
         )
         out = _child_result(cp.stdout)
         if out is None:
@@ -408,10 +412,9 @@ async def refresh(profile: str | None = None) -> JSONResponse:
         return JSONResponse(body, status_code=202)
     # the dashboard's PATH has no `hermes` and its cwd cannot import hermes_cli: use the
     # install's launcher
-    cmd = cli._hermes_cmd() + ["argus", "derive", "--all", "--quiet"]
-    global _refresh
+    cmd = [*cli._hermes_cmd(), "argus", "derive", "--all", "--quiet"]
     try:
-        _refresh = cli.spawn_logged(cmd, cli.derive_log(_root()), env=os.environ.copy())
+        _refresh[:] = [cli.spawn_logged(cmd, cli.derive_log(_root()), env=os.environ.copy())]
     except OSError as e:
         body = {"started": False, "running": False, "error": str(e)}
         return JSONResponse(body, status_code=500)

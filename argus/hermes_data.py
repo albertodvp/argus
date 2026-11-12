@@ -302,7 +302,7 @@ def read_ledger(home: Path, since: float | None = None) -> list[LedgerEntry]:
     if not path.exists():
         return []
     out: list[LedgerEntry] = []
-    with open(path, encoding="utf-8", errors="replace") as f:
+    with path.open(encoding="utf-8", errors="replace") as f:
         for line in f:
             e = parse_ledger_line(line)
             if e is not None and (since is None or e["ts_epoch"] >= since):

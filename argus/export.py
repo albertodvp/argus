@@ -164,6 +164,7 @@ def _plugin_rows(home: Path) -> _PluginRows:
                     "ledger_entry": a["ledger_entry"],
                     "pending_id": a["pending_id"],
                     "at": a["applied_at"],
+                    "by": a["applied_by"],
                 }
                 out["attempts"][key] = row  # the latest attempt of any outcome
                 # the latest success: applied, or staged while Hermes still holds the pending write.
@@ -331,10 +332,8 @@ def _turns(
         outcomes = p["outcomes"] if p is not None else {}
         tc: dict[str, list[int]] = {}
         errs: list[list[str]] = []
-        for tool, sig, excerpt, tcid in t["calls"]:
-            cat = None
-            if tcid and tcid in outcomes:
-                sig, cat = outcomes[tcid]
+        for tool, called_sig, excerpt, tcid in t["calls"]:
+            sig, cat = outcomes[tcid] if tcid and tcid in outcomes else (called_sig, None)
             x = tc.setdefault(tool, [0, 0])
             x[0] += 1
             if sig:
@@ -404,7 +403,7 @@ def _intents(
             continue
         key = (t["profile"], iid)
         if key not in ids:
-            eid = iid if iid not in {v for v in ids.values()} else f"{t['profile']}.{iid}"
+            eid = iid if iid not in set(ids.values()) else f"{t['profile']}.{iid}"
             ids[key] = eid
             intents[eid] = _intent(eid, t["profile"], plug[t["profile"]]["intents"][iid])
         it = intents[ids[key]]
@@ -511,7 +510,7 @@ def _learnings(
                 plus, minus = _count_diff(diff)
                 iid = at(ledger_sid, ts) if ledger_sid else None
                 db, da = signals.desc_of(b), signals.desc_of(a)
-                L: Learning = {
+                learning: Learning = {
                     "id": f"{en['id']}:{rel}",
                     "entry": en["id"],
                     "profile": name,
@@ -535,25 +534,25 @@ def _learnings(
                 key_t: _Target = ("skill_edit", en["id"])
                 applied = plug[name]["applied"].get(key_t)
                 if applied:
-                    L["applied"] = applied
+                    learning["applied"] = applied
                 attempt = plug[name]["attempts"].get(key_t)
                 if attempt:
-                    L["last_attempt"] = attempt
+                    learning["last_attempt"] = attempt
                 if edit_row and (edit_row["evidence"] or edit_row["learned"]):
-                    L["review"] = {
+                    learning["review"] = {
                         "learned": edit_row["learned"] or "",
                         "trigger": edit_row["trigger"] or "",
                         "evidence_in_run": edit_row["evidence"] or "unreviewed",
                     }
                 texts: signals.BlameEdit = {
-                    "id": L["id"],
+                    "id": learning["id"],
                     "ts": ts,
                     "profile": name,
                     "file": rel,
                     "_before": b,
                     "_after": a,
                 }
-                edited.append((L, texts))
+                edited.append((learning, texts))
 
     def edit_ts(pair: tuple[Learning, signals.BlameEdit]) -> float:
         return pair[0]["ts"]
@@ -737,7 +736,7 @@ def build(root: Path, profiles: list[str] | None = None, label: str | None = Non
     _add_children(intents, children, at)
     learnings, texts, rolled_back, writes = _learnings(dumps, plug, intents, at)
     sig_keys = sorted(
-        {k for k in examples}
+        set(examples)
         | {f"{x[0]}|{x[1]}" for t_out in out_turn.values() for x in t_out["errs"]}
         | {f"runtime|{r}" for t_out in out_turn.values() for r in t_out["rt"]}
     )

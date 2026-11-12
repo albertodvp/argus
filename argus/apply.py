@@ -8,9 +8,8 @@ write when `skills.write_approval` is on. Both run with the ledger actor `user`;
 gets the actor of whoever approves it. The skill a proposal names is resolved with Hermes'
 published `tools.skills_tool.locate_skill`; a name Hermes cannot resolve to one skill is refused.
 
-Hermes is imported lazily inside the functions: the module stays importable by the dashboard
-backend (which only uses `result`/`log_attempt`), and a Hermes without these internals gives a
-`failed` outcome. Every real attempt (not --dry-run) is recorded in the plugin table apply_log.
+Hermes is reached only through `argus.hermes_internals`: a Hermes without these internals gives
+a `failed` outcome. Every real attempt (not --dry-run) is recorded in the plugin table apply_log.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ from typing import Final, Literal, NotRequired, TextIO, TypeAlias, Unpack
 from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypedDict
 
-from . import store
+from . import hermes_internals, store
 from .dbtypes import PROPOSAL_ROW, ProposalRow, query_as, scalar
 from .hermes_data import LedgerLine
 from .jsontypes import JsonObject, as_str, loads_object
@@ -247,15 +246,14 @@ def rollback(
 ) -> ApplyResult:
     kind = "skill_edit"
     try:
-        from tools import skill_ledger as sl
-    except Exception as e:
+        entries = _ledger(hermes_internals.ledger_entries())  # newest first
+    except hermes_internals.HermesUnavailableError as e:
         return result(
             "failed",
             f"Hermes skill ledger unavailable ({e}); use `hermes curator rollback {entry_id}`",
             kind,
             entry_id,
         )
-    entries = _ledger(sl.list_entries())  # newest first
     idx = next((i for i, x in enumerate(entries) if x["id"] == entry_id), None)
     if idx is None:
         return result("refused", f"no ledger entry {entry_id} in this profile", kind, entry_id)
@@ -315,22 +313,19 @@ def rollback(
         return result(
             "dry-run",
             f"would roll back entry {entry_id} ({entry.get('action')} on '{entry.get('skill')}'): "
-            f"restore {', '.join({f: None for f in files_})} to the state before it",
+            f"restore {', '.join(sorted(set(files_)))} to the state before it",
             kind,
             entry_id,
         )
     if late := _late(deadline, kind, entry_id):
         return late
-    tok = sl.set_ledger_actor("user")
     try:
-        ok, msg = sl.rollback_entry(entry_id)
-    except Exception as e:
+        ok, msg = hermes_internals.rollback_as_user(entry_id)
+    except Exception as e:  # Hermes' failure becomes the attempt's outcome
         return result("failed", f"rollback_entry raised {type(e).__name__}: {e}", kind, entry_id)
-    finally:
-        sl.reset_ledger_actor(tok)
     if not ok:
         return result("refused", msg, kind, entry_id)
-    recent = _ledger(sl.list_entries(skill=entry.get("skill"), limit=50))
+    recent = _ledger(hermes_internals.ledger_entries(skill=entry.get("skill"), limit=50))
     rb = next((x for x in recent if _rolls_back(x, entry_id)), None)
     return result("applied", msg, kind, entry_id, ledger_entry=rb["id"] if rb else None)
 
@@ -430,25 +425,22 @@ def _skill_call(
     """Run skill_manage as the ledger actor `user` and turn its JSON into an apply result. With
     `expect` (the SKILL.md apply checked), the ledger entry of the write must name that file."""
     try:
-        from tools import skill_ledger as sl
-        from tools import skill_manager_tool as smt
-    except Exception as e:
+        seen = {x.get("id") for x in hermes_internals.ledger_entries(skill=name, limit=50)}
+        hermes_internals.need(hermes_internals.SKILL_MANAGER, "tools.skill_manager_tool")
+    except hermes_internals.HermesUnavailableError as e:
         return result(
             "failed", f"Hermes skill_manage unavailable ({e}); use the copied command", kind, pid
         )
-    seen = {x.get("id") for x in sl.list_entries(skill=name, limit=50)}
-    tok = sl.set_ledger_actor("user")
     try:
-        if action == "create":
-            raw = smt.skill_manage("create", name, content=args["content"])
-        else:
-            raw = smt.skill_manage(
-                "patch", name, old_string=args["old"], new_string=args["new"], file_path=None
-            )
-    except Exception as e:
+        raw = hermes_internals.skill_manage_as_user(
+            action,
+            name,
+            content=args.get("content"),
+            old_string=args.get("old"),
+            new_string=args.get("new"),
+        )
+    except Exception as e:  # Hermes' failure becomes the attempt's outcome
         return result("failed", f"skill_manage raised {type(e).__name__}: {e}", kind, pid)
-    finally:
-        sl.reset_ledger_actor(tok)
     try:
         r = _SKILL_MANAGED.validate_json(raw)
     except (TypeError, ValueError):
@@ -468,7 +460,7 @@ def _skill_call(
         new = next(
             (
                 x
-                for x in _ledger(sl.list_entries(skill=name, limit=50))
+                for x in _ledger(hermes_internals.ledger_entries(skill=name, limit=50))
                 if x.get("id") not in seen
                 and x.get("actor") == "user"
                 and x.get("action") == action
@@ -596,10 +588,8 @@ def _locate(home: Path, name: str) -> tuple[Path | None, str | None]:
     """The skill `name` of the profile as Hermes resolves it, with the published
     `tools.skills_tool.locate_skill` over the profile's roots (`store.hermes_skill_roots`):
     `(file, None)` for one skill, `(None, None)` when none has that name (and no directory has it),
-    `(None, reason)` when Hermes refuses to pick one or cannot answer. Raises ImportError without
-    Hermes."""
-    from tools.skills_tool import locate_skill
-
+    `(None, reason)` when Hermes refuses to pick one or cannot answer. Raises
+    HermesUnavailableError without Hermes."""
     if "/" in name or "\\" in name:
         return None, f"apply takes a bare skill name, not the path {name}."
     roots = store.hermes_skill_roots(Path(home))
@@ -607,7 +597,7 @@ def _locate(home: Path, name: str) -> tuple[Path | None, str | None]:
         return None, "Hermes could not list the profile's skill directories."
     if not roots:
         return None, None
-    err, _dir, md = locate_skill(name, None, roots)
+    err, _dir, md = hermes_internals.locate_skill(name, roots)
     if md is not None:
         return md, None
     try:
@@ -644,7 +634,7 @@ def _writer_name(home: Path, name: str, md: Path) -> tuple[str | None, str | Non
         not rel.parts
         or md.is_symlink()
         or _crosses_symlink(local, md.parent)
-        or os.path.realpath(md.parent) != os.path.join(os.path.realpath(local), *rel.parts)
+        or Path(os.path.realpath(md.parent)) != Path(os.path.realpath(local)).joinpath(*rel.parts)
     ):
         return None, f"{where} reached through a symlink, which apply does not follow."
     if _scanner_skips(md):
@@ -885,7 +875,7 @@ def run(
     lock.parent.mkdir(parents=True, exist_ok=True)
     by = f"{applied_by} --force" if force else applied_by
     r: ApplyResult
-    with open(lock, "a") as f:
+    with lock.open("a") as f:
         if not _lock(f, deadline - MARGIN if deadline is not None else time.time() + LOCK_WAIT):
             r = result(
                 "refused", "another apply is running in this profile; retry in a moment", kind, tid

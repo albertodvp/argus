@@ -13,7 +13,8 @@ is a Hermes plugin that reads that work from the side of the people using the ag
 - **Proposals.** Rules of its own, backed by several intents or a recurring error, as a minimal diff
   on the current `SKILL.md`.
 - **A person decides.** Keep or reject each edit, accept or dismiss each proposal. Argus writes a
-  skill only on an explicit apply.
+  skill only on an explicit apply, or, if you opt in, applies the best-backed additive proposals
+  itself and shows each one with its undo.
 
 <sub>Argus Panoptes was the hundred-eyed watchman whom Hermes lulled to sleep and slew; Hera set his
 eyes in the peacock's tail. Here the eyes are given back, and they watch on Hermes' side.</sub>
@@ -178,13 +179,44 @@ write is approved it stays there, with the ledger entry the approval wrote; once
 proposal again, like after a rollback of its ledger entry. The dashboard counts proposals not yet
 carried out, accepted ones included; `/argus` and `/status` count proposals still undecided.
 
+### Auto-apply (opt-in)
+
+An approval you never refuse is not a check. With `auto_apply: true` in a profile's settings, Argus
+accepts and applies a few proposals itself at the end of each derive pass of that profile that ends
+without an error, through the same apply and checks as your click, and leaves the rest to you. A
+proposal qualifies only when all hold:
+
+- the latest proposals pass emitted it (even one that ran before you turned the setting on); the
+  backlog of older proposals is never worked through;
+- confidence `high`, 2+ intents cited, and a patch that only adds lines to an existing skill: never
+  a new skill, never a removed line;
+- nobody decided on it or tried to apply it, nor on another proposal for that skill citing one of
+  its intents (the same lesson reworded: you already answered it);
+- no change to that skill was rolled back since auto-apply first wrote or staged one there (from an
+  hour before, as the write precedes its record): undoing is a no, and the skill stays yours;
+- fewer than `auto_apply_per_week` (3) automatic writes in the last 7 days, counting staged ones
+  and writes Argus cannot prove (`unknown`, e.g. with `skills.ledger` off), which also end the pass.
+
+The automatic accept is recorded only if the proposal still has no decision at that moment, so a
+dismiss you click meanwhile wins. Each one is a decision and an apply attempt marked `auto` (the
+ledger entry says actor `user`, the only actor a plugin can write as); a refused or failed attempt
+gives the proposal back to you and is never retried. With `skills.write_approval` on it only stages
+the write.
+
+The dashboard tags it **auto-applied** under "carried out", its edit reads "auto-applied proposal",
+and the undo (reject that edit, or `hermes -p <profile> curator rollback <entry>`) is next to it.
+`hermes argus status` shows the week's count, the derive log names each one, and
+`hermes argus auto-apply` shows what the policy would apply now, writing nothing.
+
+![An auto-applied proposal under "carried out", with its undo](assets/showcase/11-auto-applied-proposal.png)
+
 | | Background review | Curator | Argus |
 |---|---|---|---|
 | Unit | one turn | skill | intent |
 | Question | what from this turn is worth saving? | is this skill still used? | did this edit come from evidence, and what should the agent learn next? |
 | Runs | end of a turn whose counter is due | at most every 7 days | idle 10 minutes, at most hourly, or on demand |
 | Model slot | `auxiliary.background_review` | `auxiliary.curator` | `auxiliary.argus` (inherits the curator's) |
-| Writes skills | yes | yes | only on an explicit apply |
+| Writes skills | yes | yes | only on an explicit apply, or with `auto_apply` on |
 
 ## What it adds to Hermes
 
@@ -195,10 +227,10 @@ tools, no middleware, no model calls in hooks.
 |---|---|
 | Hooks | `pre_llm_call`, `post_tool_call`, `on_session_end`, `on_skill_lifecycle`, `on_session_delete`: tool and turn outcomes, the ledger entry of each `skill_manage`, cleanup of deleted sessions. They only enqueue rows on a writer thread. |
 | Model slot | `auxiliary.argus` (`ctx.register_auxiliary_task`), chosen in `hermes model`; every call has a JSON schema |
-| CLI | `hermes argus backfill \| derive \| status \| export \| apply`, `-p <profile>` or `--all` |
+| CLI | `hermes argus backfill \| derive \| status \| export \| apply \| auto-apply` (preview), `-p <profile>` or `--all` |
 | Slash command | `/argus`: intent of the current session, reviews waiting (on messaging platforms only the session's intents) |
 | Dashboard | **Argus** tab, a banner on the Skills page, API at `/api/plugins/argus/` |
-| Settings | `plugins.entries.argus.settings`: `idle_minutes` (10), `interval_minutes` (60), `since_days` (30) |
+| Settings | `plugins.entries.argus.settings`: `idle_minutes` (10), `interval_minutes` (60), `since_days` (30), `auto_apply` (false), `auto_apply_per_week` (3) |
 | Storage | `plugin-data/argus/` per profile: `data.db` (SQLite), run reports, logs, locks |
 
 Argus reads `state.db`, the curator ledger and its blob store, and never writes them; skills change
@@ -217,8 +249,10 @@ only on apply, through Hermes' own functions. Storage in detail: [docs/data-mode
 ## Development
 
 Plain Python run by Hermes (3.11 to 3.14) with only what Hermes installs; copied into an install,
-never built. Strict typing: mypy with no `Any`, ruff, pytest, and `tsc` over the dashboard's
-JavaScript. Hermes is not installed for the checks: `typings/` stubs the few internals Argus imports.
+never built. Strict typing: mypy with no `Any`, ruff (imports at the top only, pytest and pathlib
+style among its rules), pytest, and `tsc` over the dashboard's JavaScript. Hermes is not installed
+for the checks: only `argus/hermes_internals.py` imports it, guarded, and `typings/` stubs the few
+internals it uses.
 
 ```bash
 nix develop -c just check        # lint, typecheck, typecheck-js, test; tools from flake.nix

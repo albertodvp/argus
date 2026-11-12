@@ -13,14 +13,15 @@ def test_loads_keeps_json_loads_semantics() -> None:
     value = jsontypes.loads('[NaN, Infinity, 123456789012345678901234567890, "\\ud800", 1.5]')
     assert isinstance(value, list)
     first = value[0]
-    assert isinstance(first, float) and math.isnan(first)
+    assert isinstance(first, float)
+    assert math.isnan(first)
     assert value[1:] == [math.inf, 123456789012345678901234567890, "\ud800", 1.5]
 
 
 def test_loads_errors_are_value_errors() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Expecting"):
         jsontypes.loads("{")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="valid dictionary"):
         jsontypes.loads_object("[1]")
 
 
@@ -83,8 +84,10 @@ def test_closed_schema_closes_every_derive_schema() -> None:
     for schema in schemas:
         closed = jsontypes.closed_schema(schema)
         objects = _objects(closed)
-        assert objects and all(o["additionalProperties"] is False for o in objects)
-        assert _objects(schema) and all("additionalProperties" not in o for o in _objects(schema))
+        assert objects
+        assert all(o["additionalProperties"] is False for o in objects)
+        assert _objects(schema)
+        assert all("additionalProperties" not in o for o in _objects(schema))
 
 
 def test_closed_schema_keeps_explicit_and_property_names() -> None:

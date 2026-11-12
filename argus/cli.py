@@ -21,19 +21,23 @@ from typing import Final, Literal, SupportsFloat, SupportsIndex, TextIO, TypeAli
 
 from pydantic import TypeAdapter
 
-from . import store
+from . import apply, auto, backfill, derive, export, hermes_data, hermes_internals, store
 from .dbtypes import count, query, sql_value
 from .hermes_api import CliHandler, Llm, PluginContext
 from .jsontypes import JsonObject, JsonValue, as_object, closed_schema, loads_object
 
 log = logging.getLogger("hermes.plugins.argus")
 
-ConfigKey: TypeAlias = Literal["interval_minutes", "idle_minutes", "since_days"]
+ConfigKey: TypeAlias = Literal[
+    "interval_minutes", "idle_minutes", "since_days", "auto_apply", "auto_apply_per_week"
+]
 
-DEFAULTS: Final[dict[ConfigKey, int]] = {
+DEFAULTS: Final[dict[ConfigKey, int | bool]] = {
     "interval_minutes": 60,
     "idle_minutes": 10,
     "since_days": 30,
+    "auto_apply": False,
+    "auto_apply_per_week": 3,
 }
 LAST_RUN: Final = "derive_last_run"
 LAST_SPAWN: Final = "derive_last_spawn"
@@ -50,21 +54,20 @@ TABLES: Final = (
 )
 
 
-def hermes_home() -> Path:
-    try:
-        from hermes_constants import get_hermes_home
-
-        return Path(get_hermes_home())
-    except Exception:
-        return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-
-
 def config(ctx: PluginContext, key: ConfigKey) -> object:
     try:
         v = ctx.get_config(key, DEFAULTS[key])
     except Exception:
         v = DEFAULTS[key]
     return DEFAULTS[key] if v is None else v
+
+
+def auto_policy(ctx: PluginContext) -> tuple[bool, int]:
+    """This profile's auto-apply settings: (on, successful applies allowed per 7 days)."""
+    return (
+        auto.setting_on(config(ctx, "auto_apply")),
+        auto.setting_per_week(config(ctx, "auto_apply_per_week")),
+    )
 
 
 def _float(value: object) -> float:
@@ -113,7 +116,7 @@ def try_lock(home: Path) -> TextIO | None:
     held."""
     path = lock_path(home)
     path.parent.mkdir(parents=True, exist_ok=True)
-    f = open(path, "a+")
+    f = path.open("a+")  # the open file is the lock, handed to the caller
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -136,7 +139,7 @@ def unlock(f: TextIO) -> None:
 def lock_held(home: Path) -> bool:
     """Whether a derive holds the profile's lock now; creates nothing and writes nothing."""
     try:
-        f = open(lock_path(home))
+        f = lock_path(home).open()  # closed in the finally below
     except OSError:
         return False  # never derived here
     try:
@@ -204,7 +207,7 @@ def spawn_logged(
     """Start `cmd` detached, stdout/stderr appended to `log_file`; a daemon thread reaps it (no
     zombie) and appends an `[argus] exit <code> at <epoch>` line that `last_exit` reads back."""
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_file, "ab") as out:
+    with log_file.open("ab") as out:
         out.write(f"[argus] start at {time.time():.0f}: {' '.join(cmd)}\n".encode())
         out.flush()
         proc = subprocess.Popen(
@@ -220,7 +223,7 @@ def spawn_logged(
     def reap() -> None:
         rc = proc.wait()
         try:
-            with open(log_file, "ab") as out:
+            with log_file.open("ab") as out:
                 out.write(f"[argus] exit {rc} at {time.time():.0f}\n".encode())
         except OSError:
             log.warning("argus: cannot write %s", log_file, exc_info=True)
@@ -233,7 +236,7 @@ def last_exit(log_file: Path, lines: int = 20) -> LastExit | None:
     """Last finished run recorded in a derive.log: `{exit_code, at, log}` (log = its last output
     lines)."""
     try:
-        with open(log_file, "rb") as f:
+        with log_file.open("rb") as f:
             f.seek(0, os.SEEK_END)
             f.seek(max(0, f.tell() - 32768))
             tail = f.read().decode("utf-8", "replace").splitlines()
@@ -261,7 +264,7 @@ def spawn_derive(home: Path) -> bool:
         return False
     unlock(held)  # the child takes the lock itself; it exits at once if another one won the race
     spawn_logged(
-        _hermes_cmd() + ["-p", store.profile_name(home), "argus", "derive", "--quiet"],
+        [*_hermes_cmd(), "-p", store.profile_name(home), "argus", "derive", "--quiet"],
         derive_log(home),
         env={**os.environ, "HERMES_HOME": str(home)},
     )
@@ -311,7 +314,9 @@ class IdleScheduler:
 
 # ---------------------------------------------------------------- CLI
 def setup(parser: argparse.ArgumentParser) -> None:
-    sub = parser.add_subparsers(dest="argus_cmd", metavar="{status,backfill,derive,export,apply}")
+    sub = parser.add_subparsers(
+        dest="argus_cmd", metavar="{status,backfill,derive,export,apply,auto-apply}"
+    )
     sub.add_parser(
         "status",
         help="plugin data per profile: rows, backfill cursor, last derive, model calls of the"
@@ -382,6 +387,11 @@ def setup(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="apply even without a current reject/accept decision (recorded in apply_log)",
     )
+    sub.add_parser(
+        "auto-apply",
+        help="show what the auto_apply policy would apply in this profile now, even with the"
+        " setting off; writes nothing (with auto_apply on, derive applies it after each pass)",
+    )
 
 
 _STRS: Final = TypeAdapter[list[str]](list[str])
@@ -445,8 +455,6 @@ def _fmt_time(t: object) -> str:
 
 
 def status(root: Path, home: Path) -> str:
-    from . import derive, hermes_data
-
     lines = [f"argus — install {root} (active profile: {store.profile_name(home)})"]
     homes = store.profile_homes(root)
     if not homes:
@@ -486,6 +494,21 @@ def status(root: Path, home: Path) -> str:
     return "\n".join(lines)
 
 
+def auto_status(home: Path, on: bool, per_week: int) -> str:
+    """The active profile's auto-apply line of `hermes argus status`."""
+    prof = store.profile_name(home)
+    if not on:
+        return f"  auto-apply ({prof}): off"
+    n = 0
+    if store.db_path(home).exists():
+        conn = store.open_db(home)
+        try:
+            n = auto.used(conn, time.time())
+        finally:
+            conn.close()
+    return f"  auto-apply ({prof}): on, {n} of {per_week} used in the last 7 days"
+
+
 def _silent(_line: str) -> None:
     return None
 
@@ -496,12 +519,8 @@ def run_derive(
     profiles: list[str] | None,
     stages: list[str] | None,
     quiet: bool,
+    home: Path | None = None,
 ) -> int:
-    try:
-        from . import derive
-    except Exception as e:
-        print(f"argus: derive is unavailable: {e}", file=sys.stderr)
-        return 2
     names = profiles or list(store.profile_homes(root))
     homes = {n: h for n, h in store.profile_homes(root).items() if n in names}
     if unknown := [s for s in stages or [] if s not in derive.STAGES]:
@@ -529,8 +548,6 @@ def run_derive(
         # catch up first with what no hook recorded (a profile without the plugin enabled, edits
         # made while it was off): tool outcomes and skill edits since each profile's cursor; the
         # window stays as it is, and a profile never backfilled stays skipped
-        from . import backfill
-
         if caught_up := [n for n, h in homes.items() if store.backfilled(h)]:
             backfill.run(root, profiles=caught_up, log=say, estimate=False)
         report = derive.run(root, make_llm(ctx), profiles=list(homes), stages=stages, log=say)
@@ -545,18 +562,53 @@ def run_derive(
         if aborted := report.get("aborted"):
             print(f"argus: derive {aborted}; run it again once the model answers", file=sys.stderr)
             return 1
+        # auto-apply only where this process runs: its settings are this profile's, and Hermes'
+        # skill functions write this profile's skills
+        # only after a clean pass of this very profile: a profile or stage error leaves the
+        # proposals it would act on unverified
+        mine = next(
+            (n for n, h in homes.items() if home is not None and h.resolve() == home.resolve()),
+            None,
+        )
+        rep = report["profiles"].get(mine or "")
+        clean = (
+            rep is not None
+            and "error" not in rep
+            and "skipped" not in rep
+            and not any("error" in st for st in rep["stages"].values())
+        )
+        if home is not None and clean:
+            on, per_week = auto_policy(ctx)
+            if on:
+                run_auto(home, per_week, dry_run=False, quiet=quiet)
         return 0
     finally:
         for f in locks.values():
             unlock(f)
 
 
-def run_export(root: Path, out: str | None, profiles: list[str] | None) -> int:
+def run_auto(home: Path, per_week: int, dry_run: bool, quiet: bool = False) -> int:
+    """Auto-apply in the profile at `home`; one line per proposal tried, printed even when `quiet`
+    (a skill write belongs in derive.log). Exit 0 unless an attempt failed (refused | failed |
+    unknown)."""
     try:
-        from . import export
-    except Exception as e:
-        print(f"argus: export is unavailable: {e}", file=sys.stderr)
-        return 2
+        results = auto.run(home, per_week, dry_run=dry_run)
+    except Exception as e:  # never let it fail the derive pass that ran before it
+        log.warning("argus: auto-apply failed", exc_info=True)
+        print(f"argus: auto-apply failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    prof = store.profile_name(home)
+    if not results and not quiet:
+        print(f"argus auto-apply ({prof}): nothing to apply")
+    for p, r in results:
+        print(f"argus auto-apply ({prof}): proposal {p['id']} on {p['skill_name']}: {r['outcome']}")
+        print(f"  rule: {p['rule']}\n  {r['message']}")
+        if r.get("ledger_entry"):
+            print(f"  undo: hermes -p {prof} curator rollback {r['ledger_entry']}")
+    return 0 if all(r["ok"] for _p, r in results) else 1
+
+
+def run_export(root: Path, out: str | None, profiles: list[str] | None) -> int:
     data = json.dumps(export.build(root, profiles=profiles), default=str)
     if not out:
         print(data)
@@ -570,8 +622,6 @@ def run_export(root: Path, out: str | None, profiles: list[str] | None) -> int:
 
 def run_apply(home: Path, args: argparse.Namespace) -> int:
     """`hermes argus apply`: exit 0 when applied or staged (or a passing --dry-run), 1 otherwise."""
-    from . import apply
-
     proposal = _arg_str(args, "proposal")
     kind, tid = ("proposal", proposal) if proposal else ("skill_edit", _arg_str(args, "rollback"))
     if tid is None:  # `--proposal ""`: the exclusive group then leaves no target
@@ -604,16 +654,15 @@ def run_apply(home: Path, args: argparse.Namespace) -> int:
 
 def make_handler(ctx: PluginContext) -> CliHandler:
     def handler(args: argparse.Namespace) -> int:
-        home = hermes_home()
+        home = hermes_internals.hermes_home()
         root = store.root_of(home)
         cmd_arg: object = getattr(args, "argus_cmd", None)
         cmd = cmd_arg or "status"
         if cmd == "status":
             print(status(root, home))
+            print(auto_status(home, *auto_policy(ctx)))
             return 0
         if cmd == "backfill":
-            from . import backfill
-
             since = _arg_float(args, "since")  # explicit: --since 0 asks for the whole history
             default = _since_days(config(ctx, "since_days"))  # since_days 0 asks nothing
             if any(d is not None and d < 0 for d in (since, default)):
@@ -627,12 +676,20 @@ def make_handler(ctx: PluginContext) -> CliHandler:
             return 0
         if cmd == "derive":
             return run_derive(
-                ctx, root, _scope(args, home), _arg_strs(args, "stage"), _arg_flag(args, "quiet")
+                ctx,
+                root,
+                _scope(args, home),
+                _arg_strs(args, "stage"),
+                _arg_flag(args, "quiet"),
+                home,
             )
         if cmd == "export":
             return run_export(root, _arg_str(args, "out"), _arg_strs(args, "only_profile"))
         if cmd == "apply":
             return run_apply(home, args)
+        if cmd == "auto-apply":
+            print(auto_status(home, *auto_policy(ctx)).strip())
+            return run_auto(home, auto_policy(ctx)[1], dry_run=True)
         return 2
 
     return handler
@@ -646,12 +703,12 @@ def slash(
     any allowed user of the chat can ask, only the session's own intents: no judge advice, no
     profile-wide counts."""
     full = platform == "cli"
-    home = hermes_home()
+    home = hermes_internals.hermes_home()
     if not store.db_path(home).exists():
         return "argus: no data yet — run `hermes argus backfill`, then `hermes argus derive`."
     conn = store.open_db(home)
     try:
-        lines = []
+        lines: list[str] = []
         if session_id:
             sid = sql_value(session_id)
             rows = query(
@@ -661,12 +718,12 @@ def slash(
                 "order by max(t.user_message_id) desc",
                 (sid,),
             )
-            for r in rows:
-                lines.append(
-                    f"• {r['title']!s} — {r['status'] or 'not judged'!s} "
-                    f"({r['n']!s} turn{'s' if r['n'] != 1 else ''})"
-                    + (f"\n  next: {r['next']!s}" if r["next"] and full else "")
-                )
+            lines.extend(
+                f"• {r['title']!s} — {r['status'] or 'not judged'!s} "
+                f"({r['n']!s} turn{'s' if r['n'] != 1 else ''})"
+                + (f"\n  next: {r['next']!s}" if r["next"] and full else "")
+                for r in rows
+            )
             errs = count(
                 conn,
                 "select count(*) from tool_outcome where session_id = ? and error_sig is not null",

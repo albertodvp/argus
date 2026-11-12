@@ -87,13 +87,14 @@ def test_window_request_semantics() -> None:
     assert backfill.window(have, 0, now) == (0.0, True, None)
     kept, reread, note = backfill.window(have, 1, now)
     assert (kept, reread) == (have, False)
-    assert note is not None and "would narrow" in note
+    assert note is not None
+    assert "would narrow" in note
     assert backfill.window(0.0, 3, now) == (
         0.0,
         False,
         "whole history kept (--since 3 would narrow it)",
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="positive number of days"):
         backfill.window(have, -1, now)
     # the since_days setting: only a profile's first backfill, never a note
     assert backfill.window(None, 30, now, explicit=False) == (now - 30 * DAY, True, None)
@@ -106,15 +107,18 @@ def test_backfill_sets_widens_and_never_narrows(home: Path) -> None:
     logs: list[str] = []
     backfill.run(home, since_days=3, log=logs.append)
     first = store.read_window(home)
-    assert first is not None and abs(first - (time.time() - 3 * DAY)) < 60
+    assert first is not None
+    assert abs(first - (time.time() - 3 * DAY)) < 60
     assert tool_outcomes(home) == 1
 
     # more history: the window widens and the older tool results are read despite the cursor
     rep = backfill.run(home, since_days=7, log=logs.append)
     second = store.read_window(home)
-    assert second is not None and second < first
+    assert second is not None
+    assert second < first
     done = rep["default"]
-    assert "error" not in done and done.get("window_start") == second
+    assert "error" not in done
+    assert done.get("window_start") == second
     assert tool_outcomes(home) == 2
 
     # less history is reported, not applied; no request (or the setting) keeps the window quietly

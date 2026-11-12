@@ -88,6 +88,23 @@ is recorded in `applied_by`; `--dry-run` needs no decision and writes nothing).
   is already pending. Hermes refuses a locked skill and, with `skills.write_approval` on, stages the
   write (outcome `staged`); the ledger entry written on `/skills approve` carries the approver's actor.
 
+**Auto-apply** (`argus/auto.py`, setting `auto_apply`, off by default) runs at the end of a derive
+pass of the profile whose setting enables it, under that profile's derive.lock (one pass at a time),
+and writes the same two rows a person's accept and apply write, with `decision.decided_by` and
+`apply_log.applied_by` = `auto` (`decision.note` = the policy version, `auto/v1`), then calls the
+same `apply.run`. It considers only the proposals of the latest proposals pass (meta
+`proposals_last_ids`, written by the proposals stage), never one with a decision or an apply
+attempt, nor one citing an intent that a decided or attempted proposal for the same skill cites (the
+same lesson, reworded). The decision is inserted only while the proposal has no decision and no
+attempt (one statement). When the apply is refused or fails it deletes its own decision again, so
+the proposal returns to the person's queue; the attempt stays in `apply_log` and is not repeated. An
+`unknown` outcome keeps the decision, counts against the budget and ends the pass. A ledger
+`rollback` of any change to the skill made since auto-apply first wrote or staged one there (read
+from the ledger, so a staged write approved later counts; from an hour before the attempt's record)
+stops auto-apply on that skill for good. The proposals stage lists the rules Argus applied, staged
+or may have written next to the harness' edits (under their ledger entry, or `argus-<proposal id>`),
+so it does not propose them again reworded, and may cite them as overlaps.
+
 Each attempt (not `--dry-run`) is a row in `apply_log` (`outcome` applied | staged | refused | failed |
 unknown, Hermes' message, the ledger entry it wrote, the pending id of a staged write); applied and
 staged ones also fill `executed_at`, `execution_result` and `ledger_entry_id` of the target's latest

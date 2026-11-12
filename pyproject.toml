@@ -1,6 +1,6 @@
 [project]
 name = "argus"
-version = "0.1.1"
+version = "0.1.2"
 description = "Hermes Agent plugin: read the agent by intents and review what it learns"
 readme = "README.md"
 # Argus runs inside Hermes and uses only what Hermes ships (pydantic; fastapi in the dashboard backend).
@@ -97,7 +97,14 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ANN"]
+select = [
+  "E", "F", "I", "UP", "B", "ANN",
+  "PLC0415",  # imports at the top only: Hermes is reached through argus/hermes_internals.py
+  "PLE", "PLW", "SIM", "C4", "RUF", "RET", "PERF", "PIE", "ISC", "ERA", "N", "PT", "PTH",
+]
+
+[tool.ruff.lint.flake8-pytest-style]
+fixture-parentheses = true  # `@pytest.fixture()`: the bare decorator is untyped for mypy (no Any)
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

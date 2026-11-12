@@ -29,7 +29,7 @@ from typing import Final, Literal, NotRequired, TypeAlias, TypeGuard, TypeVar
 from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypedDict
 
-from . import hermes_data, prompts, signals, store
+from . import auto, hermes_data, prompts, signals, store
 from .dbtypes import (
     INTENT_ROW,
     RUN_ROW,
@@ -63,13 +63,77 @@ RECENT: Final = 20  # assign: candidate list size (recently active + keyword mat
 OLDER: Final = 10
 CONS_CHUNK: Final = 120  # consolidate: intents per call
 WORD: Final = re.compile(r"[a-zà-ÿ0-9_\-]{4,}")
-STOP: Final = set(
-    """this that with from have what when your please about there which would could should them
-then than will into also just make some more only like want need here were been does done each
-other after before again still sono della delle degli questo questa come fare anche perché dove
-quando tutti tutte nella nelle alla allo agli cosa ogni deve devi puoi dopo prima ancora solo
-molto""".split()
-)
+STOP: Final = {
+    "this",
+    "that",
+    "with",
+    "from",
+    "have",
+    "what",
+    "when",
+    "your",
+    "please",
+    "about",
+    "there",
+    "which",
+    "would",
+    "could",
+    "should",
+    "them",
+    "then",
+    "than",
+    "will",
+    "into",
+    "also",
+    "just",
+    "make",
+    "some",
+    "more",
+    "only",
+    "like",
+    "want",
+    "need",
+    "here",
+    "were",
+    "been",
+    "does",
+    "done",
+    "each",
+    "other",
+    "after",
+    "before",
+    "again",
+    "still",
+    "sono",
+    "della",
+    "delle",
+    "degli",
+    "questo",
+    "questa",
+    "come",
+    "fare",
+    "anche",
+    "perché",
+    "dove",
+    "quando",
+    "tutti",
+    "tutte",
+    "nella",
+    "nelle",
+    "alla",
+    "allo",
+    "agli",
+    "cosa",
+    "ogni",
+    "deve",
+    "devi",
+    "puoi",
+    "dopo",
+    "prima",
+    "ancora",
+    "solo",
+    "molto",
+}
 KINDS: Final = ("task", "probe", "chat")
 WHOS: Final = ("real-user", "team", "automated-test", "scheduled")
 NO_DIFF_ACTIONS: Final = ("archive", "delete", "remove_file", "purge")
@@ -172,6 +236,12 @@ class _LearnedRow(TypedDict):
     learned: str | None
 
 
+class _AppliedRuleRow(TypedDict):
+    ledger_entry: str
+    skill_name: str
+    rule: str
+
+
 class _EditIdRow(TypedDict):
     ledger_entry_id: str
 
@@ -184,6 +254,7 @@ class _ProposalDiffRow(TypedDict):
 TURN_LINK: Final = TypeAdapter(_TurnLink)
 TURN_KEY_ROW: Final = TypeAdapter(_TurnKeyRow)
 LEARNED_ROW: Final = TypeAdapter(_LearnedRow)
+APPLIED_RULE_ROW: Final = TypeAdapter(_AppliedRuleRow)
 EDIT_ID_ROW: Final = TypeAdapter(_EditIdRow)
 PROPOSAL_DIFF_ROW: Final = TypeAdapter(_ProposalDiffRow)
 
@@ -380,14 +451,14 @@ ABORT_AFTER = 5
 of the run would only fail the same way, one timeout at a time."""
 
 
-class ModelUnavailable(Exception):
+class ModelUnavailableError(Exception):
     """The model raised ABORT_AFTER times in a row; the run stops instead of trying every unit."""
 
 
 class Calls:
     """Wraps the injected llm: counts calls and failures; an exception or an answer that is not a
-    JSON object is a failure. ABORT_AFTER exceptions in a row raise ModelUnavailable, then and on
-    every later call, without calling the model again."""
+    JSON object is a failure. ABORT_AFTER exceptions in a row raise ModelUnavailableError, then
+    and on every later call, without calling the model again."""
 
     def __init__(self, llm: LlmFn, log: Log) -> None:
         self.llm, self.log, self.calls, self.failures = llm, log, 0, 0
@@ -397,7 +468,7 @@ class Calls:
         self, instructions: str, text: str, schema: JsonObject, purpose: str
     ) -> JsonObject | None:
         if self.raised_in_row >= ABORT_AFTER:
-            raise ModelUnavailable(f"the model raised {self.raised_in_row} times in a row")
+            raise ModelUnavailableError(f"the model raised {self.raised_in_row} times in a row")
         self.calls += 1
         r: object
         try:
@@ -412,7 +483,7 @@ class Calls:
             self.failures += 1
             self.log(f"argus: {purpose}: no answer, skipped")
             if self.raised_in_row >= ABORT_AFTER:
-                raise ModelUnavailable(f"the model raised {self.raised_in_row} times in a row")
+                raise ModelUnavailableError(f"the model raised {self.raised_in_row} times in a row")
             return None
         return answer
 
@@ -738,7 +809,7 @@ def consolidate(px: Profile, llm: Calls) -> Stats:
         if v["merged_into"] is None and v["kind"] != "routine" and k in members
     }
     touched = [k for k, v in live.items() if since is None or v["updated_at"] > float(since)]
-    stats = dict(touched=len(touched), merge=0, split=0, rename=0, ignored=0)
+    stats = {"touched": len(touched), "merge": 0, "split": 0, "rename": 0, "ignored": 0}
     if not touched:
         return stats
     kw = {
@@ -839,11 +910,10 @@ def apply_op(
         frm, title = op.get("from"), op.get("title", "").strip()
         if not live(frm) or not title:
             return False
-        moved: list[TurnKey] = []
-        for x in op.get("turns", []):
-            if x in labels and labels[x][0] == frm:
-                moved.append(labels[x][1])
-        keys = list({k: None for k in moved})
+        moved: list[TurnKey] = [
+            labels[x][1] for x in op.get("turns") or [] if x in labels and labels[x][0] == frm
+        ]
+        keys = list(dict.fromkeys(moved, True))
         have = {
             (r["session_id"], r["user_message_id"])
             for r in query_as(
@@ -918,7 +988,7 @@ def judge(px: Profile, llm: Calls) -> Stats:
     conn = px.conn
     rows = px.intents()
     members = px.members(rows)
-    stats = dict(candidates=0, judged=0)
+    stats = {"candidates": 0, "judged": 0}
     for iid, tt in members.items():
         it = rows[iid]
         starts = run_starts(tt)
@@ -1014,7 +1084,7 @@ def runs(px: Profile, llm: Calls) -> Stats:
     have = {
         (r["intent_id"], r["session_id"]): r for r in query_as(conn, RUN_ROW, "select * from run")
     }
-    stats = dict(runs=0, removed=0, judged=0)
+    stats = {"runs": 0, "removed": 0, "judged": 0}
     keep: set[tuple[str, str]] = set()
     for iid, tt in members.items():
         per: dict[str, list[Turn]] = {}
@@ -1154,7 +1224,14 @@ def edit_review(px: Profile, llm: Calls) -> Stats:
     their model output: no model call."""
     conn = px.conn
     plan = EditPlan(px)
-    stats = dict(pending=len(plan.todo), reviewed=0, no_diff=0, by_person=0, no_run=0, relabelled=0)
+    stats = {
+        "pending": len(plan.todo),
+        "reviewed": 0,
+        "no_diff": 0,
+        "by_person": 0,
+        "no_run": 0,
+        "relabelled": 0,
+    }
     if px.window_start is not None:
         stats["skipped"] = 0  # edits whose session has messages only before the window
     if not plan.todo:
@@ -1216,7 +1293,7 @@ def edit_review(px: Profile, llm: Calls) -> Stats:
 # ---------------------------------------------------------------- 6 proposals
 def proposals(px: Profile, llm: Calls, force: bool = False) -> Stats:
     conn = px.conn
-    stats = dict(proposed=0, patched=0, skipped=0)
+    stats = {"proposed": 0, "patched": 0, "skipped": 0}
     changed = (
         px.changed.get("judge", 0)
         + px.changed.get("edit_review", 0)
@@ -1247,9 +1324,14 @@ def proposals(px: Profile, llm: Calls, force: bool = False) -> Stats:
         "and learned != '' and ts >= ? order by ts desc limit 60",
         (px.window_start or 0.0,),
     )[::-1]
-    el = "\n".join(f"{e['ledger_entry_id']}: {e['skill_name']}: {e['learned']}" for e in edits)
+    applied = applied_rules(conn)
+    el = "\n".join(
+        [f"{e['ledger_entry_id']}: {e['skill_name']}: {e['learned']}" for e in edits]
+        + [f"{a['ledger_entry']}: {a['skill_name']}: {a['rule']}" for a in applied]
+    )
     if not il and not pl:
         store.meta_set(conn, "proposals_at", str(time.time()))
+        store.meta_set(conn, auto.LAST_PASS, "[]")
         conn.commit()
         return stats
     files = store.skill_files(px.home)
@@ -1264,8 +1346,9 @@ def proposals(px: Profile, llm: Calls, force: bool = False) -> Stats:
     edit_ids = {
         e["ledger_entry_id"]
         for e in query_as(conn, EDIT_ID_ROW, "select ledger_entry_id from skill_edit")
-    }
+    } | {a["ledger_entry"] for a in applied}
     old = {x["id"]: x for x in query_as(conn, PROPOSAL_DIFF_ROW, "select id, diff from proposal")}
+    emitted: list[str] = []
     for p in r.get("proposals", []):
         rule, sk = p.get("rule", "").strip(), p.get("skill", "").strip()
         name = sk[4:].strip() if sk.startswith("new:") else sk
@@ -1280,11 +1363,11 @@ def proposals(px: Profile, llm: Calls, force: bool = False) -> Stats:
             diff = patch(path.read_text(encoding="utf-8", errors="replace"), rule, llm)
             stats["patched"] += diff is not None
         pidx = [i for i in p.get("patterns", []) if 0 <= i < len(pats)]
-        evidence = dict(
-            intents=[i for i in p.get("intents", []) if i in members],
-            error_sigs=[pats[i]["sig"] for i in pidx],
-            overlaps=[i for i in p.get("overlaps", []) if i in edit_ids],
-        )
+        evidence = {
+            "intents": [i for i in p.get("intents", []) if i in members],
+            "error_sigs": [pats[i]["sig"] for i in pidx],
+            "overlaps": [i for i in p.get("overlaps", []) if i in edit_ids],
+        }
         confidence = p.get("confidence")
         conn.execute(
             "insert or replace into proposal (id, skill_name, is_new_skill, file, rule, why, "
@@ -1304,10 +1387,27 @@ def proposals(px: Profile, llm: Calls, force: bool = False) -> Stats:
         )
         # never hold the write lock across the next patch() model call (hook Writer would time out)
         conn.commit()
+        emitted.append(pid)
         stats["proposed"] += 1
     store.meta_set(conn, "proposals_at", str(time.time()))
+    store.meta_set(conn, auto.LAST_PASS, json.dumps(emitted))
     conn.commit()
     return stats
+
+
+def applied_rules(conn: sqlite3.Connection) -> list[_AppliedRuleRow]:
+    """Argus' own rules written or staged for a skill (by a person's apply or auto-apply), newest
+    first, under their ledger entry (or `argus-<proposal id>` while apply_log has none, e.g. a
+    staged write). The proposals pass lists them with the harness' edits, so it does not propose
+    them again in other words; one rolled back or rejected since stays listed: it was answered."""
+    return query_as(
+        conn,
+        APPLIED_RULE_ROW,
+        "select coalesce(a.ledger_entry, 'argus-' || p.id) ledger_entry, p.skill_name, p.rule"
+        " from apply_log a join proposal p on a.target_kind = 'proposal' and p.id = a.target_id"
+        " where a.outcome in ('applied', 'staged', 'unknown') group by p.id"
+        " order by max(a.applied_at) desc limit 30",
+    )
 
 
 def patch(text: str, rule: str, llm: Calls) -> str | None:
@@ -1419,18 +1519,25 @@ def estimate_lines(est: Estimate, window: Literal["set", "widened"] | None = Non
     due = f", {est['due']} intents and runs due for judging" if est["due"] else ""
     unread = f", {est['unread']} new ledger entries" if est["unread"] else ""
     lines = [
-        f"next derive: about {est['calls']} model calls known now, up to {est['most']}"
-        f" ({est['assign']} sessions to assign, {est['review'] + est['learn']} skill edits to"
-        f" review{unread}{due}; up to {est['new']} to judge the intents and runs the new turns"
-        " land in; + one per proposal)"
+        (
+            f"next derive: about {est['calls']} model calls known now, up to {est['most']}"
+            f" ({est['assign']} sessions to assign, {est['review'] + est['learn']} skill edits to"
+            f" review{unread}{due}; up to {est['new']} to judge the intents and runs the new"
+            " turns land in; + one per proposal)"
+        )
     ]
     if est["most"] > LARGE:
         why = f", over the window this backfill {window}" if window else ""
         lines += [
-            f"warning: this can be a large pass on the auxiliary.argus model{why}; a smaller"
-            " --since keeps it cheaper (2-7 days on a busy agent), but the window never narrows.",
-            "derive also starts by itself once the agent is idle: to spend less on this window,"
-            " choose a cheaper model for auxiliary.argus (`hermes model`) first.",
+            (
+                f"warning: this can be a large pass on the auxiliary.argus model{why}; a smaller"
+                " --since keeps it cheaper (2-7 days on a busy agent), but the window never"
+                " narrows."
+            ),
+            (
+                "derive also starts by itself once the agent is idle: to spend less on this"
+                " window, choose a cheaper model for auxiliary.argus (`hermes model`) first."
+            ),
         ]
     return lines
 
@@ -1455,14 +1562,14 @@ def run(
     report = RunReport(started_at=started.isoformat(timespec="seconds"), stages=want, profiles={})
     calls = Calls(llm, log)
     force_proposals = bool(stages) and "proposals" in (stages or [])
-    fns: dict[str, Callable[[Profile, Calls], Stats]] = dict(
-        assign=assign,
-        consolidate=consolidate,
-        judge=judge,
-        runs=runs,
-        edit_review=edit_review,
-        proposals=lambda px, c: proposals(px, c, force=force_proposals),
-    )
+    fns: dict[str, Callable[[Profile, Calls], Stats]] = {
+        "assign": assign,
+        "consolidate": consolidate,
+        "judge": judge,
+        "runs": runs,
+        "edit_review": edit_review,
+        "proposals": lambda px, c: proposals(px, c, force=force_proposals),
+    }
     for name, home in store.profile_homes(root).items():
         if report.get("aborted"):
             break
@@ -1492,15 +1599,15 @@ def run(
                 out: StageReport
                 try:
                     out = dict(fns[st](px, calls))
-                except ModelUnavailable as e:  # the provider is down for every later stage too
+                except ModelUnavailableError as e:  # the provider is down for every later stage too
                     conn.rollback()
                     log(f"argus: {name}: stage {st} stopped: {e}")
-                    out = dict(error=str(e))
+                    out = {"error": str(e)}
                     report["aborted"] = rep["error"] = f"stopped at {st}: {e}"
                 except Exception as e:  # a broken stage must not block the next ones
                     conn.rollback()
                     log(f"argus: {name}: stage {st} failed: {e!r}\n{traceback.format_exc()}")
-                    out = dict(error=repr(e))
+                    out = {"error": repr(e)}
                 out.update(
                     llm_calls=calls.calls - c0,
                     llm_failures=calls.failures - f0,

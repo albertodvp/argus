@@ -17,8 +17,8 @@ from .signals import BlameLine
 
 __all__ = [
     "ApplyAttempt",
-    "ApplyOutcome",
     "ApplyBody",
+    "ApplyOutcome",
     "BlameLine",
     "Child",
     "DecisionAction",
@@ -128,6 +128,7 @@ class ApplyAttempt(TypedDict):
     ledger_entry: str | None
     pending_id: str | None
     at: float
+    by: str | None  # cli | dashboard | auto (the auto_apply policy), `--force` appended when forced
     # proposals only, on an applied one whose ledger entry was rolled back since: the rollback's id
     rolled_back: NotRequired[str]
 

@@ -40,7 +40,8 @@ def test_tool_error_with_a_structured_message_is_recorded(home: Path) -> None:
     )
     got = rows(home, "select tool_call_id, status, error_sig from tool_outcome")
     assert len(got) == 1
-    assert got[0]["tool_call_id"] == "c1" and got[0]["status"] == "error"
+    assert got[0]["tool_call_id"] == "c1"
+    assert got[0]["status"] == "error"
     assert "boom" in str(got[0]["error_sig"])
 
 
