@@ -24,7 +24,7 @@ package = false
 
 [tool.mypy]
 python_version = "3.11"
-files = ["argus", "tests"]
+files = ["argus", "tests", "bench"]
 mypy_path = "typings"
 strict = true
 plugins = ["pydantic.mypy"]

@@ -184,6 +184,7 @@ def run(
     log: Callable[[str], object] = print,
     default_days: float | None = None,
     estimate: bool = True,
+    now: float | None = None,
 ) -> dict[str, ProfileReport]:
     """Backfill every profile under `root` (or the named ones). Returns a per-profile report.
 
@@ -191,7 +192,8 @@ def run(
     whole history, DAYS > 0 the last DAYS days. Without it, `default_days` (the since_days setting)
     is the request, as a default. Reads start at the window (the whole history when unset),
     narrowed by the cursor unless the window was just set or widened. `estimate`: log the next
-    derive's calls (derive's own catch-up skips it)."""
+    derive's calls (derive's own catch-up skips it). `now`: the time a DAYS window counts back
+    from (default: the clock); a frozen one gives a fixture the same window on every run (bench)."""
     report: dict[str, ProfileReport] = {}
     for name, home in store.profile_homes(Path(root)).items():
         if profiles and name not in profiles:
@@ -211,7 +213,7 @@ def run(
             start, reread, note = window(
                 have,
                 since_days if explicit else default_days,
-                time.time(),
+                time.time() if now is None else now,
                 explicit=explicit,
                 fresh=store.meta_get(conn, CURSOR) is None,
             )

@@ -647,9 +647,12 @@ def test_derive_auto_applies_only_after_a_clean_pass_of_its_profile(
     def fake_run(*a: object, **k: object) -> derive.RunReport:
         return {"started_at": "", "stages": [], "profiles": {"default": rep}}
 
+    def fake_llm(instructions: str, text: str, schema: JsonObject, purpose: str, /) -> object:
+        return None
+
     monkeypatch.setattr(cli, "run_auto", fake_auto)
     monkeypatch.setattr(derive, "run", fake_run)
-    code = cli.run_derive(Ctx({"auto_apply": True}), h, ["default"], None, True, h)  # type: ignore[arg-type]
+    code = cli.run_derive(fake_llm, h, ["default"], None, True, (h, 3))
     assert code == 0
     assert len(ran) == expect
 

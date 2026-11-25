@@ -19,6 +19,11 @@ typecheck-js:
 test: setup
     uv run --locked pytest
 
+# Reproducible numbers, no model and no API key: derive on bench/fixture.tar.xz with every model
+# call answered from bench/cassette.jsonl (strict), compared with bench/expected.json (bench/README.md).
+bench *args: setup
+    uv run --locked python -m bench.check {{args}}
+
 # Apply and skill discovery against a real Hermes (its interpreter), in throw-away Hermes homes:
 # the cases where Argus' checks and Hermes' skill_manage could disagree about the file to write.
 integration python:

@@ -21,9 +21,9 @@ from typing import Final, Literal, SupportsFloat, SupportsIndex, TextIO, TypeAli
 
 from pydantic import TypeAdapter
 
-from . import apply, auto, backfill, derive, export, hermes_data, hermes_internals, store
+from . import apply, auto, backfill, cassette, derive, export, hermes_data, hermes_internals, store
 from .dbtypes import count, query, sql_value
-from .hermes_api import CliHandler, Llm, PluginContext
+from .hermes_api import CliHandler, Llm, LlmFn, PluginContext
 from .jsontypes import JsonObject, JsonValue, as_object, closed_schema, loads_object
 
 log = logging.getLogger("hermes.plugins.argus")
@@ -351,6 +351,24 @@ def setup(parser: argparse.ArgumentParser) -> None:
         "runs, edit_review, proposals",
     )
     p.add_argument("--quiet", action="store_true", help="no progress output")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument(
+        "--record",
+        metavar="PATH",
+        help="also write every model call to the cassette PATH (JSONL: prompt hash, purpose,"
+        " answer; no prompt text), to replay the run without a model",
+    )
+    g.add_argument(
+        "--replay",
+        metavar="PATH",
+        help="answer every model call from the cassette PATH (no model is used, no auto-apply);"
+        " a call it does not hold fails the run",
+    )
+    p.add_argument(
+        "--lenient",
+        action="store_true",
+        help="with --replay: a call missing from the cassette is a failed model call instead",
+    )
     p = sub.add_parser("export", help="write the dashboard data (window.DATA) of this install")
     p.add_argument(
         "--out",
@@ -514,13 +532,16 @@ def _silent(_line: str) -> None:
 
 
 def run_derive(
-    ctx: PluginContext,
+    llm: LlmFn,
     root: Path,
     profiles: list[str] | None,
     stages: list[str] | None,
     quiet: bool,
-    home: Path | None = None,
+    auto_apply: tuple[Path, int] | None = None,
 ) -> int:
+    """Catch-up backfill and derive of the profiles named (None: every one) with the model call
+    `llm`. `auto_apply`: (this process' profile home, applies allowed per 7 days) when its
+    auto_apply setting is on; it then runs after a clean pass of that profile."""
     names = profiles or list(store.profile_homes(root))
     homes = {n: h for n, h in store.profile_homes(root).items() if n in names}
     if unknown := [s for s in stages or [] if s not in derive.STAGES]:
@@ -550,7 +571,7 @@ def run_derive(
         # window stays as it is, and a profile never backfilled stays skipped
         if caught_up := [n for n, h in homes.items() if store.backfilled(h)]:
             backfill.run(root, profiles=caught_up, log=say, estimate=False)
-        report = derive.run(root, make_llm(ctx), profiles=list(homes), stages=stages, log=say)
+        report = derive.run(root, llm, profiles=list(homes), stages=stages, log=say)
         for h in homes.values():
             conn = store.open_db(h)
             try:
@@ -566,10 +587,10 @@ def run_derive(
         # skill functions write this profile's skills
         # only after a clean pass of this very profile: a profile or stage error leaves the
         # proposals it would act on unverified
-        mine = next(
-            (n for n, h in homes.items() if home is not None and h.resolve() == home.resolve()),
-            None,
-        )
+        if auto_apply is None:
+            return 0
+        home, per_week = auto_apply
+        mine = next((n for n, h in homes.items() if h.resolve() == home.resolve()), None)
         rep = report["profiles"].get(mine or "")
         clean = (
             rep is not None
@@ -577,14 +598,54 @@ def run_derive(
             and "skipped" not in rep
             and not any("error" in st for st in rep["stages"].values())
         )
-        if home is not None and clean:
-            on, per_week = auto_policy(ctx)
-            if on:
-                run_auto(home, per_week, dry_run=False, quiet=quiet)
+        if clean:
+            run_auto(home, per_week, dry_run=False, quiet=quiet)
         return 0
     finally:
         for f in locks.values():
             unlock(f)
+
+
+def run_replay(
+    tape: cassette.Replayer,
+    root: Path,
+    profiles: list[str] | None,
+    stages: list[str] | None,
+    quiet: bool,
+) -> int:
+    """`hermes argus derive --replay`: the same pass with every model call answered from the
+    cassette, no model and no auto-apply (the answers are not the model's now). In strict mode a
+    call the cassette does not hold fails the run (exit 1)."""
+    code = run_derive(tape, root, profiles, stages, quiet)
+    if not quiet:
+        print(f"argus: {tape.summary()}", file=sys.stderr)
+    if (why := tape.failure()) is not None:
+        print(f"argus: replay failed: {why}", file=sys.stderr)
+        return 1
+    return code
+
+
+def derive_cmd(ctx: PluginContext, args: argparse.Namespace, root: Path, home: Path) -> int:
+    """`hermes argus derive`: on the `argus` model slot, its calls also written to a cassette with
+    --record; or answered from a cassette with --replay, without constructing a model."""
+    profiles, stages = _scope(args, home), _arg_strs(args, "stage")
+    quiet, lenient = _arg_flag(args, "quiet"), _arg_flag(args, "lenient")
+    replay = _arg_str(args, "replay")
+    if replay is not None:
+        try:
+            tape = cassette.Replayer.load(Path(replay), strict=not lenient)
+        except (OSError, ValueError) as e:
+            print(f"hermes argus derive: error: --replay: {e}", file=sys.stderr)
+            return 2
+        return run_replay(tape, root, profiles, stages, quiet)
+    if lenient:
+        print("hermes argus derive: error: --lenient needs --replay", file=sys.stderr)
+        return 2
+    llm: LlmFn = make_llm(ctx)
+    if (record := _arg_str(args, "record")) is not None:
+        llm = cassette.Recorder(llm, Path(record))
+    on, per_week = auto_policy(ctx)
+    return run_derive(llm, root, profiles, stages, quiet, (home, per_week) if on else None)
 
 
 def run_auto(home: Path, per_week: int, dry_run: bool, quiet: bool = False) -> int:
@@ -675,14 +736,7 @@ def make_handler(ctx: PluginContext) -> CliHandler:
             backfill.run(root, profiles=_scope(args, home), since_days=since, default_days=default)
             return 0
         if cmd == "derive":
-            return run_derive(
-                ctx,
-                root,
-                _scope(args, home),
-                _arg_strs(args, "stage"),
-                _arg_flag(args, "quiet"),
-                home,
-            )
+            return derive_cmd(ctx, args, root, home)
         if cmd == "export":
             return run_export(root, _arg_str(args, "out"), _arg_strs(args, "only_profile"))
         if cmd == "apply":

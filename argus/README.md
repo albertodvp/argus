@@ -44,6 +44,8 @@ hermes argus status              # rows per profile, last backfill and derive, h
 hermes argus export --out data.js
 hermes argus apply --proposal <id> [--dry-run]   # carry out an accepted proposal (or --rollback <entry>)
 hermes argus auto-apply                          # what the opt-in auto_apply policy would apply now (writes nothing)
+hermes argus derive --record run.jsonl           # also write each model call to a cassette (prompt hash and answer, no prompt text)
+hermes argus derive --replay run.jsonl           # derive again from a cassette: no model, no auto-apply; a call it lacks fails the run
 ```
 
 `-p <profile>` selects the profile, `--all` runs backfill/derive on every profile of the install.

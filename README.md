@@ -275,8 +275,34 @@ Without Nix: uv 0.13.0, just and Node.js with npm.
 |---|---|
 | `argus/` | the plugin (schema in `argus/schema.sql`) |
 | `tests/`, `typings/` | checks and Hermes stubs |
+| `bench/` | reproducible numbers: fixture, cassette, expected numbers ([bench/README.md](bench/README.md)) |
 | `docs/` | [intents](docs/intents.md), [Hermes' learning loop](docs/hermes-learning-loop.md), [data model](docs/data-model.md), [showcase](docs/showcase.md) |
 | `assets/` | mark, wordmark, banner, screenshots |
+
+## Reproducible numbers
+
+The numbers Argus reports on the demo (intents, proposals, skill edits by evidence, runs by status)
+can be checked by anyone, without a model or an API key:
+
+```bash
+nix develop -c just bench   # derive on bench/fixture.tar.xz from bench/cassette.jsonl, compared with bench/expected.json
+```
+
+`hermes argus derive --record PATH` writes every model call of a pass to a **cassette** (JSONL: a
+sha256 of the prompt, its purpose and the answer; no prompt text), and `--replay PATH` runs the
+pass again answering each call from it, with no model constructed and no auto-apply. One prompt
+asked twice gets its answers in recorded order; a call that failed fails again. A prompt the
+cassette does not hold fails the run, naming the stage and the key (`--lenient` makes it a failed
+call instead): a change to the inputs, to `prompts.py` or to how derive builds a prompt shows up as
+a miss.
+
+The bench fixture is a compact copy of what backfill and derive read from the fictional demo home
+(state.db rows of the history window, the ledger from its start, the blobs those entries name,
+each skill's `SKILL.md`), with the window frozen: it starts a fixed number of days before a fixed
+`now`, so the replay asks the same prompts on any day and in any directory. `just bench` unpacks it
+into a temporary Hermes home, backfills, replays the cassette strictly and compares the headline
+numbers; any difference or miss exits 1. Building the fixture and recording the cassette (about
+210 model calls on the demo): [bench/README.md](bench/README.md).
 
 ## License
 

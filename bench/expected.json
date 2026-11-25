@@ -1,0 +1,21 @@
+{
+ "intents": 40,
+ "model_calls": 220,
+ "proposals": 2,
+ "proposals_unquoted": 1,
+ "runs": {
+  "cron_failure": 3,
+  "error": 30,
+  "ok": 27,
+  "silent": 3
+ },
+ "skill_edits": {
+  "no-run": 7,
+  "observed-failure": 18,
+  "observed-success": 24,
+  "speculative": 45,
+  "unlabelled": 8,
+  "user-correction": 24
+ },
+ "speculative_pct": 40.5
+}
