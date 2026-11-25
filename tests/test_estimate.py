@@ -211,6 +211,7 @@ def test_warning_above_the_threshold(tmp_path: Path) -> None:
         learn=0,
         unread=0,
         due=0,
+        checks=0,
         calls=derive.LARGE,
         new=0,
         most=derive.LARGE,

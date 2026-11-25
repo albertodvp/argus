@@ -19,9 +19,10 @@ that writes a profile's skills must run with that profile's HERMES_HOME from its
 from __future__ import annotations
 
 import os
+import sys
 from contextvars import Token
 from pathlib import Path
-from typing import Protocol, TypeVar
+from typing import Protocol, TypeVar, cast
 
 T = TypeVar("T")
 
@@ -75,6 +76,24 @@ class SkillManager(Protocol):
     ) -> str: ...
 
 
+class WebServer(Protocol):
+    """`hermes_cli.web_server`, the dashboard server (private): the guard of its sensitive routes,
+    which raises (HTTP 401) for a request it does not authorize."""
+
+    def _require_token(self, request: object) -> None: ...
+
+
+class _Lookup(Protocol):
+    def get(self, key: str, default: object = None, /) -> object: ...
+
+
+class _Scoped(Protocol):
+    """A Starlette request, as far as its ASGI scope."""
+
+    @property
+    def scope(self) -> _Lookup: ...
+
+
 CONSTANTS: Constants | None
 SKILLS_TOOL: SkillsTool | None
 SKILL_LEDGER: SkillLedger | None
@@ -123,6 +142,32 @@ def hermes_home() -> Path:
         except Exception:  # any failure: the environment still names the home
             pass
     return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+
+
+def dashboard_request_authorized(request: object) -> bool:
+    """Whether Hermes authorized `request` to the Argus dashboard API the way it authorizes its
+    own sensitive routes. In the dashboard server (`plugins.isolation: in_process`, the default):
+    its guard `web_server._require_token` (the dashboard session token, or the login of a gated
+    dashboard) accepts the request. In Hermes' plugin host (`plugins.isolation: host`), which
+    serves the request the server forwarded: the server's guard decision, which Hermes carries in
+    the request's ASGI state (`hosted_http_authenticated`, set by
+    `plugin_host_http_auth.with_hosted_admission`), is True. False in any other process: the
+    modules are looked up, never imported here (importing the server would build its state)."""
+    module = sys.modules.get("hermes_cli.web_server")
+    if module is not None:
+        server = cast("WebServer", module)
+        try:
+            server._require_token(request)
+        except Exception:  # HTTPException(401), or a request that is not one
+            return False
+        return True
+    if sys.modules.get("hermes_cli.plugin_host_http_auth") is None:
+        return False
+    try:
+        state = cast("_Scoped", request).scope.get("state")
+        return cast("_Lookup", state).get("hosted_http_authenticated") is True
+    except Exception:  # not a request, or no state
+        return False
 
 
 def skill_search_dirs(home: Path) -> tuple[list[tuple[int, Path]], Path]:

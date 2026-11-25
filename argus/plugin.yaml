@@ -1,10 +1,11 @@
 name: argus
 version: 0.1.2
-description: "Argus reads a Hermes agent by intents instead of sessions and reviews what it learns: skill edits made without evidence and the skill edits it proposes, in a dashboard tab and `hermes argus`."
+description: "Argus reads a Hermes agent by intents instead of sessions and reviews what it learns: skill edits made without evidence and the skill edits it proposes, in a dashboard tab and `hermes argus`. A rule a person accepted can also become a deterministic tool-call check, approved by a person and enforced in pre_tool_call."
 author: albertodvp
 requires_hermes: ">=0.22.5"
 provides_hooks:
   - pre_llm_call
+  - pre_tool_call
   - post_tool_call
   - on_session_end
   - on_skill_lifecycle

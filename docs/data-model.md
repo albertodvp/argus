@@ -64,9 +64,9 @@ by the same message timestamp. So:
 
 | Layer | Tables | Written by | Lifetime |
 |---|---|---|---|
-| 1 captured | `tool_outcome`, `turn_outcome`, `skill_edit` | hooks (live) and `hermes argus backfill` | append-only; only what state.db lacks |
-| 2 derived | `intent`, `turn_intent`, `run`, `proposal`, plus the derived columns of layer 1 | derivation passes, deterministic or `ctx.llm` | every value carries `derived_by` (stage and version, e.g. `edit_review/v2`). A stage redoes rows of an older version only where it says so: edit_review v2 relabels v1 rows by its rules without model calls; the other stages keep theirs |
-| 3 judgments | `decision`, `apply_log` | dashboard, slash commands; `hermes argus apply` (CLI or the dashboard's apply button) | never recomputed; `decision` keeps a snapshot of what was decided on, `apply_log` one row per apply attempt |
+| 1 captured | `tool_outcome`, `turn_outcome`, `skill_edit`, `check_event` | hooks (live) and `hermes argus backfill` | append-only; only what state.db lacks |
+| 2 derived | `intent`, `turn_intent`, `run`, `proposal`, `check_draft`, plus the derived columns of layer 1 | derivation passes, deterministic or `ctx.llm` | every value carries `derived_by` (stage and version, e.g. `edit_review/v2`). A stage redoes rows of an older version only where it says so: edit_review v2 relabels v1 rows by its rules without model calls; the other stages keep theirs |
+| 3 judgments | `decision`, `apply_log`, `check_approval` | dashboard, slash commands; `hermes argus apply` (CLI or the dashboard's apply button); `hermes argus checks approve\|enforce\|observe\|revoke` from a person's terminal | never recomputed; `decision` keeps a snapshot of what was decided on, `apply_log` one row per apply attempt, `check_approval` a copy of the approved check |
 
 Derived data that is 1:1 with a captured row is a column on it (`tool_outcome.error_sig`,
 `skill_edit.evidence`); derived data with an identity of its own is a table.
@@ -173,6 +173,31 @@ found (rejected), an earlier success stands, if any. `SCHEMA_VERSION` 2
 adds the table; `store.open_db` re-runs the idempotent `schema.sql` on an older file, so existing
 databases upgrade in place.
 
+### Enforced checks
+
+Design: [docs/enforce.md](enforce.md). Three tables, one per layer (`SCHEMA_VERSION` 3; `store.migrate`
+brings an older file up in place: `schema.sql` adds the tables, `store.MIGRATIONS` holds what
+`create ... if not exists` cannot do, nothing so far):
+
+- `check_draft` (layer 2, one row per accepted rule, key `proposal_id`): derive's stage `checks`
+  (`derived_by` `checks/v1`) writes the canonical JSON of the check the `argus` model drafted and its
+  sha256, or a null `spec` and the reason when the rule is not checkable (or the parser refused the
+  model's check). Drafted once per rule; `hermes argus checks draft <id>` redrafts it.
+- `check_approval` (layer 3, append-only): each approval or mode change by a person (`decided_by`
+  `cli` | `dashboard`, nothing else is accepted), with a copy of the approved check (`spec`), its
+  `sha256`, `version` (a new check text for the rule gets the next one), `mode` (`observe`,
+  `enforce`, `revoked`), the tool, and the rule and skill as approved. The latest row of a rule is
+  in force while it is not revoked, the rule's latest decision is still `accept`, and
+  `sha256(spec)` still equals `sha256`. Every write also rewrites
+  `plugin-data/argus/enforced.json` (tool -> rules in enforce), which the hook reads only when it
+  cannot read the DB.
+- `check_event` (layer 1): a call a check in force matched (`outcome` `would_block` in observe,
+  `blocked` in enforce; `cause` `match`, `unknown` when the argument cannot be read, `error` when
+  the check raised), or `unverified` (`cause` `hash`) once per process for a check whose text no
+  longer has its approved sha256. Written by the `pre_tool_call` hook through the writer thread.
+  Its `detail` copies part of the call's arguments, so `on_session_delete` clears the events of a
+  deleted session like its other layer-1 rows.
+
 ### What hooks capture
 
 | Table | Hook | Why state.db is not enough |
@@ -180,6 +205,7 @@ databases upgrade in place.
 | `tool_outcome` | `post_tool_call` (`status`, `error_type`, `error_message`, `duration_ms`) | state.db keeps the result text, not whether the call failed or how long it took |
 | `turn_outcome` | `on_session_end` (`turn_exit_reason`, `completed`, `interrupted`, `failed`), `agent_loop_stopped` | state.db has a per-message `finish_reason`, not why the turn ended |
 | `skill_edit` | `on_skill_lifecycle` (`provenance`), `post_tool_call` on `skill_manage` (session, turn, tool call) | the ledger does not name the turn or the tool call |
+| `check_event` | `pre_tool_call` (tool, arguments, session, tool call) | Hermes keeps a blocked call's result, not which check matched it, nor the calls a check in observe mode would have blocked |
 
 `provenance` is where the skill came from (`installed`, `agent_created`, `external`, `local`,
 `unknown`), not who wrote the edit. Who wrote it comes from the ledger actor (`agent`, `curator`,
@@ -191,7 +217,9 @@ Backfill fills `tool_outcome` from tool messages in state.db (status and error s
 from the result text, no duration) and `skill_edit` from the ledger (no provenance). `origin` says
 which path wrote a row.
 
-Hooks never call a model. They append through an in-process queue drained by one writer thread.
+Hooks never call a model. They append through an in-process queue drained by one writer thread;
+`pre_tool_call` reads the approvals in force through one read-only connection per profile, again
+only when `pragma data_version` says another connection committed.
 Model work (intents, outcomes, edit review, proposals) runs later on sessions without a current
 derivation: on demand, from `hermes argus derive`, or from an automation blueprint.
 

@@ -23,10 +23,14 @@ from .dbtypes import PROPOSAL_ROW, SQLITE_ROW, count, query_as, query_one
 T = TypeVar("T")
 
 PLUGIN: Final = "argus"
-# 2 adds apply_log. schema.sql is idempotent (create ... if not exists): an older DB upgrades in
-# place on its next open_db
-SCHEMA_VERSION: Final = 2
+# 2 adds apply_log; 3 adds check_draft, check_approval and check_event (docs/enforce.md).
+# schema.sql is idempotent (create ... if not exists): an older DB upgrades in place on its next
+# open_db (`migrate`)
+SCHEMA_VERSION: Final = 3
 SCHEMA_FILE: Final = Path(__file__).with_name("schema.sql")
+MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {}
+"""Statements that bring a DB to a version after schema.sql ran, for what `create ... if not
+exists` cannot do (a column added to an existing table). Versions 2 and 3 only add tables."""
 
 log = logging.getLogger("hermes.plugins.argus")
 
@@ -73,13 +77,26 @@ def open_db(home: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=30, check_same_thread=False)
     conn.row_factory = SQLITE_ROW
     conn.execute("pragma busy_timeout = 30000")
-    stored = str(meta_get(conn, "schema_version") or "")
-    if not stored.isdigit() or int(stored) < SCHEMA_VERSION:
-        conn.executescript(SCHEMA_FILE.read_text(encoding="utf-8"))
-        meta_set(conn, "schema_version", SCHEMA_VERSION)
+    migrate(conn)
     conn.execute("pragma journal_mode = wal")
     conn.execute("pragma foreign_keys = on")
     return conn
+
+
+def migrate(conn: sqlite3.Connection) -> int:
+    """Bring a plugin DB to SCHEMA_VERSION: schema.sql adds what is missing, then MIGRATIONS of
+    every later version run in order. A DB of this version or a newer one is left as it is.
+    Returns the version the DB had (0: new)."""
+    stored = str(meta_get(conn, "schema_version") or "")
+    found = int(stored) if stored.isdigit() else 0
+    if found >= SCHEMA_VERSION:
+        return found
+    conn.executescript(SCHEMA_FILE.read_text(encoding="utf-8"))
+    for version in range(found + 1, SCHEMA_VERSION + 1):
+        for sql in MIGRATIONS.get(version, ()):
+            conn.execute(sql)
+    meta_set(conn, "schema_version", SCHEMA_VERSION)
+    return found
 
 
 @overload

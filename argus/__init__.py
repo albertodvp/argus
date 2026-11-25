@@ -2,17 +2,19 @@
 
 Hooks capture what Hermes does not persist; `hermes argus backfill|derive` read past sessions and
 derive intents with the `argus` auxiliary model slot; the dashboard tab shows the result.
+`pre_tool_call` enforces the checks a person approved for accepted rules (docs/enforce.md).
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-from . import capture, cli
+from . import capture, cli, enforce
 from .hermes_api import HookCallback, PluginContext
 
 HOOKS: Final[dict[str, HookCallback]] = {
     "pre_llm_call": capture.pre_llm_call,
+    "pre_tool_call": enforce.pre_tool_call,
     "post_tool_call": capture.post_tool_call,
     "on_session_end": capture.on_session_end,
     "on_skill_lifecycle": capture.on_skill_lifecycle,
@@ -27,13 +29,13 @@ def register(ctx: PluginContext) -> None:
     ctx.register_auxiliary_task(
         "argus",
         display_name="Argus",
-        description="Intent assignment, consolidation and judgement, skill-edit review and "
-        "proposals (hermes argus derive)",
+        description="Intent assignment, consolidation and judgement, skill-edit review, "
+        "proposals and drafts of rule checks (hermes argus derive)",
         inherit_from="curator",
     )
     ctx.register_cli_command(
         "argus",
-        help="argus: backfill, derive, status, export, apply",
+        help="argus: backfill, derive, status, export, apply, checks",
         setup_fn=cli.setup,
         handler_fn=cli.make_handler(ctx),
         description="Read the agent by intents and review what it learns.",

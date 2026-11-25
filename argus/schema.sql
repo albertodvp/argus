@@ -37,6 +37,25 @@ create table if not exists tool_outcome (
   derived_by     text
 );
 create index if not exists tool_outcome_session on tool_outcome(session_id, ts);
+
+-- a tool call an approved check of an accepted rule matched (docs/enforce.md), recorded by the
+-- pre_tool_call hook; also `unverified`: a check whose text no longer matches its approved sha256
+create table if not exists check_event (
+  id           integer primary key,
+  approval_id  integer not null,          -- check_approval.id in force at the call
+  proposal_id  text not null,
+  ts           real not null,
+  session_id   text,
+  tool_call_id text,
+  tool_name    text not null,
+  outcome      text not null check (outcome in ('would_block', 'blocked', 'unverified')),
+                                          -- would_block: observe mode; blocked: enforce mode
+  cause        text not null check (cause in ('match', 'unknown', 'error', 'hash')),
+                                          -- unknown: the argument cannot be read (a match);
+                                          -- error: the check raised; hash: sha256 mismatch
+  detail       text                       -- what matched or why, cut to 300 characters
+);
+create index if not exists check_event_proposal on check_event(proposal_id, ts);
 create index if not exists tool_outcome_errors on tool_outcome(error_sig) where error_sig is not null;
 
 -- how one turn ended (on_session_end, agent_loop_stopped); not in state.db
@@ -136,6 +155,17 @@ create table if not exists proposal (
   derived_by   text not null
 );
 
+-- the deterministic check the `argus` model drafted from an accepted rule (derive stage `checks`):
+-- inert until a person approves it (check_approval); null spec = the rule is not checkable
+create table if not exists check_draft (
+  proposal_id text primary key,           -- the accepted rule (proposal.id)
+  spec        text,                       -- canonical JSON of the check (argus/checkspec.py)
+  sha256      text,                       -- sha256 of spec
+  reason      text,                       -- the model's reason, or why the parser refused its check
+  drafted_at  real not null,
+  derived_by  text not null
+);
+
 -- ---------------------------------------------------------------- 3 judgments
 
 -- a person's decision on an applied edit (keep/reject) or a proposal (accept/dismiss).
@@ -172,3 +202,21 @@ create table if not exists apply_log (
   applied_by   text                       -- cli | dashboard, `--force` appended when forced
 );
 create index if not exists apply_log_target on apply_log(target_kind, target_id, applied_at);
+
+-- a person's approval of a rule's check, and every later mode change (docs/enforce.md): append-only,
+-- the latest row of a proposal is in force. Only a person writes it (`hermes argus checks` from a
+-- terminal, or the dashboard); never derive, auto-apply or the agent.
+create table if not exists check_approval (
+  id          integer primary key,
+  proposal_id text not null,
+  version     integer not null,           -- 1, 2, ...: a new check text approved for the rule
+  tool        text not null,              -- the check's tool (its scope when the text cannot be read)
+  skill_name  text not null,              -- the rule as approved, for the block message
+  rule        text not null,
+  spec        text not null,              -- the check as approved (canonical JSON, a copy of the draft)
+  sha256      text not null,              -- sha256 of spec at approval: enforced only while it matches
+  mode        text not null check (mode in ('observe', 'enforce', 'revoked')),
+  decided_at  real not null,
+  decided_by  text not null check (decided_by in ('cli', 'dashboard'))
+);
+create index if not exists check_approval_proposal on check_approval(proposal_id, id);

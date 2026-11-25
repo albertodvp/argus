@@ -127,6 +127,13 @@ What a user should know before installing (catalog rule 13):
   patch, a new ledger entry must name the file apply checked; otherwise the outcome is `unknown`
   (also with `skills.ledger` off), with the entry id when there is one. Ledger actor: `user`. The
   dashboard's copy buttons give terminal commands with every value shell-quoted.
+- **Tool calls it can block.** The `pre_tool_call` hook evaluates the checks a person approved for
+  accepted rules ([docs/enforce.md](../docs/enforce.md)) on every tool call, without model calls;
+  it blocks a call only for a check the person set to `enforce`, and records the calls a check
+  matched in `check_event` (the matched command or path, cut to 300 characters). Drafting a check
+  is one model call per accepted rule in derive (stage `checks`, with the rule, its evidence and
+  the names of the tools the profile calls). Approving one is refused unless a person runs it from
+  their own terminal or the dashboard.
 - **Credentials.** Argus reads, stores and requests none. (Hermes reads the profile's configuration
   when Argus asks it for the skill directories; Argus gets back paths only.)
 
@@ -135,8 +142,11 @@ What a user should know before installing (catalog rule 13):
 | Module | Role |
 |---|---|
 | `capture.py` | hooks (`pre_llm_call`, `post_tool_call`, `on_session_end`, `on_skill_lifecycle`, `on_session_delete`); enqueue rows only, never call a model |
+| `enforce.py` | the `pre_tool_call` hook: approved checks of accepted rules, cached per profile, observe or enforce; never raises ([docs/enforce.md](../docs/enforce.md)) |
+| `checkspec.py`, `shellwords.py` | the closed check format (parse, sha256, match) and the shell parser of its `command` match |
+| `checks.py`, `checks_cli.py` | drafts, a person's approvals and mode changes, the person gate, `hermes argus checks` |
 | `backfill.py` | `tool_outcome` from state.db tool messages, `skill_edit` from the curator ledger; idempotent, cursor in `meta`; sets and widens the history window (`window_start` in `meta`) |
-| `derive.py` | intents, runs, edit reviews, proposals |
+| `derive.py` | intents, runs, edit reviews, proposals, check drafts |
 | `hermes_data.py` | read-only state.db / ledger / blob access, column check |
 | `store.py` | `<home>/plugin-data/argus/data.db` (schema `schema.sql`), write queue |
 | `apply.py` | `hermes argus apply` and the dashboard's apply button: `rollback_entry` / `skill_manage` patch or create (new skill) as ledger actor `user`, checks first (current decision, no later change, context unchanged, rule not yet present), one row per attempt in `apply_log` |

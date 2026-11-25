@@ -23,6 +23,9 @@ from typing_extensions import TypedDict
 
 __all__ = [
     "APPLY_LOG_ROW",
+    "CHECK_APPROVAL_ROW",
+    "CHECK_DRAFT_ROW",
+    "CHECK_EVENT_ROW",
     "DECISION_ROW",
     "INTENT_ROW",
     "META_ROW",
@@ -34,6 +37,9 @@ __all__ = [
     "TURN_INTENT_ROW",
     "TURN_OUTCOME_ROW",
     "ApplyLogRow",
+    "CheckApprovalRow",
+    "CheckDraftRow",
+    "CheckEventRow",
     "DecisionRow",
     "IntentRow",
     "MetaRow",
@@ -254,6 +260,42 @@ class ApplyLogRow(TypedDict):
     applied_by: str | None
 
 
+class CheckEventRow(TypedDict):
+    id: int
+    approval_id: int
+    proposal_id: str
+    ts: float
+    session_id: str | None
+    tool_call_id: str | None
+    tool_name: str
+    outcome: Literal["would_block", "blocked", "unverified"]
+    cause: Literal["match", "unknown", "error", "hash"]
+    detail: str | None
+
+
+class CheckDraftRow(TypedDict):
+    proposal_id: str
+    spec: str | None
+    sha256: str | None
+    reason: str | None
+    drafted_at: float
+    derived_by: str
+
+
+class CheckApprovalRow(TypedDict):
+    id: int
+    proposal_id: str
+    version: int
+    tool: str
+    skill_name: str
+    rule: str
+    spec: str
+    sha256: str
+    mode: Literal["observe", "enforce", "revoked"]
+    decided_at: float
+    decided_by: Literal["cli", "dashboard"]
+
+
 META_ROW = TypeAdapter(MetaRow)
 TOOL_OUTCOME_ROW = TypeAdapter(ToolOutcomeRow)
 TURN_OUTCOME_ROW = TypeAdapter(TurnOutcomeRow)
@@ -264,3 +306,6 @@ RUN_ROW = TypeAdapter(RunRow)
 PROPOSAL_ROW = TypeAdapter(ProposalRow)
 DECISION_ROW = TypeAdapter(DecisionRow)
 APPLY_LOG_ROW = TypeAdapter(ApplyLogRow)
+CHECK_EVENT_ROW = TypeAdapter(CheckEventRow)
+CHECK_DRAFT_ROW = TypeAdapter(CheckDraftRow)
+CHECK_APPROVAL_ROW = TypeAdapter(CheckApprovalRow)

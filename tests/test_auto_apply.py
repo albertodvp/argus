@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from test_enforce import AUTHORIZED, FORCE_PUSH, by_dashboard, draft
 from test_window import make_home, quiet
 
-from argus import apply, auto, backfill, cli, derive, hermes_internals, store
+from argus import apply, auto, backfill, checks, cli, derive, enforce, hermes_internals, store
 from argus.dbtypes import ProposalRow, count, query, scalar
 from argus.jsontypes import JsonList, JsonObject, as_list, loads, loads_object
 
@@ -557,6 +558,72 @@ def test_a_dismiss_after_the_policy_read_wins(home: Path, monkeypatch: pytest.Mo
     assert _decisions(home) == [("p1", "dismiss", "dashboard")]
 
 
+def test_a_rule_with_a_check_approval_is_left_to_the_person(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A person cleared their accept of a rule whose check they approved (the check is suspended):
+    the policy does not accept it again, which would turn that check back on."""
+    _skill(home, "sk")
+    hermes = FakeHermes(home, monkeypatch)
+    _proposal(home, "p1")
+    c = store.open_db(home)
+    try:
+        c.execute(
+            "insert into check_approval (proposal_id, version, tool, skill_name, rule, spec,"
+            " sha256, mode, decided_at, decided_by) values ('p1', 1, 'terminal', 'sk', 'r',"
+            " '{}', ?, 'enforce', ?, 'dashboard')",
+            ("0" * 64, time.time()),
+        )
+        c.commit()
+    finally:
+        c.close()
+    assert auto.run(home, per_week=3) == []
+    assert hermes.calls == []
+    assert _decisions(home) == []
+
+
+def test_a_failed_apply_keeps_an_accept_a_person_enforced_a_check_on(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A person approves and enforces the rule's check between the automatic accept and a failed
+    apply: the policy's undo leaves that accept, so the check stays in force."""
+    _skill(home, "sk")
+    hermes = FakeHermes(home, monkeypatch)
+    hermes.locked.add("sk")  # the apply is refused, after the person's approval below
+    _proposal(home, "p1")
+    monkeypatch.setattr(hermes_internals, "hermes_home", lambda: home)
+    monkeypatch.setattr(checks, "refusal_here", lambda: None)
+    monkeypatch.setattr(checks, "agent_session", lambda: None)
+    monkeypatch.setattr(hermes_internals, "dashboard_request_authorized", _is_authorized)
+    enforce.reset()
+    real_run = apply.run
+
+    def approved_meanwhile(h: Path, kind: str, tid: str, applied_by: str) -> apply.ApplyResult:
+        sha = draft(h, tid, FORCE_PUSH)
+        conn = store.open_db(h)
+        try:
+            checks.approve(conn, h, tid, sha, checks.at_terminal())
+            checks.set_mode(conn, h, tid, "enforce", sha, by_dashboard())
+        finally:
+            conn.close()
+        return real_run(h, kind, tid, applied_by=applied_by)
+
+    monkeypatch.setattr(apply, "run", approved_meanwhile)
+    [(_p, r)] = auto.run(home, per_week=3)
+    assert r["outcome"] == "refused"
+    assert _decisions(home) == [("p1", "accept", auto.BY)]  # not undone: the check owns it
+    conn = store.open_db(home)
+    try:
+        rc = checks.rule_check(conn, "p1")
+        assert rc is not None
+        assert rc["state"] == "enforce"
+    finally:
+        conn.close()
+    blocked = enforce.pre_tool_call(tool_name="terminal", args={"command": "git push -f"})
+    assert blocked is not None
+    enforce.reset()
+
+
 def test_a_write_without_a_ledger_entry_spends_the_budget_and_stops(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -762,3 +829,8 @@ def test_a_rollback_during_the_pass_stops_the_skill(
     monkeypatch.setattr(apply, "run", then_rolled_back)
     assert [p["id"] for p, _r in auto.run(home, per_week=3)] == ["p1"]
     assert "Say what you checked." not in md.read_text(encoding="utf-8")
+
+
+def _is_authorized(request: object) -> bool:
+    """Stands for Hermes' route guard: only the test's authorized request passes."""
+    return request is AUTHORIZED

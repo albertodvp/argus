@@ -10,6 +10,10 @@ declare namespace Argus {
   type DecisionAction = 'keep' | 'reject' | 'accept' | 'dismiss';
   type ApplyOutcome = 'applied' | 'staged' | 'refused' | 'failed' | 'unknown';
   type RunStatus = 'failed' | 'silent' | 'reported' | 'empty';
+  type CheckMode = 'observe' | 'enforce' | 'revoked';
+  type CheckAction = 'approve' | 'observe' | 'enforce' | 'revoke';
+  /** what a rule's check is now (docs/enforce.md) */
+  type CheckState = 'undrafted' | 'uncheckable' | 'draft' | 'observe' | 'enforce' | 'revoked' | 'suspended' | 'unverified';
 
   // ---------------------------------------------------------------- /data (export.build)
   interface Turn {
@@ -169,6 +173,53 @@ declare namespace Argus {
     role: string;
   }
 
+  /** The approval of a rule's check in force (the latest check_approval row). */
+  interface CheckApproval {
+    version: number;
+    mode: CheckMode;
+    /** canonical JSON as approved */
+    spec: string;
+    describe: string;
+    sha256: string;
+    /** the stored text still has the approved sha256 */
+    hash_ok: boolean;
+    at: number;
+    /** cli | dashboard */
+    by: string;
+  }
+
+  /** A call a check matched (check_event). */
+  interface CheckEvent {
+    ts: number;
+    /** would_block | blocked | unverified */
+    outcome: string;
+    /** match | unknown | error | hash */
+    cause: string;
+    tool: string;
+    detail: string;
+    sid: string | null;
+  }
+
+  /** A rule's deterministic check (docs/enforce.md): draft, approval, events. */
+  interface RuleCheck {
+    state: CheckState;
+    /** canonical JSON of the latest draft; null: none, or not checkable */
+    draft: string | null;
+    draft_sha256: string | null;
+    draft_describe: string;
+    /** the drafting model's reason, or why the parser refused its check */
+    reason: string;
+    drafted_at: number | null;
+    approval: CheckApproval | null;
+    /** a draft differs from the approved check */
+    stale: boolean;
+    would_block: number;
+    blocked: number;
+    unverified: number;
+    /** newest first, at most 10 */
+    events: CheckEvent[];
+  }
+
   interface Proposal {
     id: string;
     skill: string;
@@ -192,6 +243,8 @@ declare namespace Argus {
     skill_gone: boolean;
     /** its skill's SKILL.md cannot be written here (e.g. a read-only `skills.external_dirs`) */
     read_only: boolean;
+    /** null: not accepted, and no check drafted or approved */
+    check: RuleCheck | null;
   }
 
   /** A skill with history in the export that is no longer in its profile. */
@@ -280,6 +333,26 @@ declare namespace Argus {
     /** the clicked button's data-dec / data-pdec (keep, reject, accept, dismiss), or clear */
     action: string;
     snapshot?: Record<string, JsonValue>;
+  }
+
+  /** POST /check body: a person's approval or mode change of a rule's check (the response is CheckDone). */
+  interface CheckBody {
+    profile: string;
+    proposal_id: string;
+    action: CheckAction;
+    /** the sha256 of the check the page showed */
+    sha256: string;
+  }
+
+  /** POST /check response: the approval row the action wrote. */
+  interface CheckDone {
+    ok: true;
+    profile: string;
+    proposal_id: string;
+    action: CheckAction;
+    version: number;
+    mode: CheckMode;
+    sha256: string;
   }
 
   type Outcome = ApplyOutcome | 'dry-run';

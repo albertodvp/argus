@@ -176,7 +176,8 @@ def candidates(conn: sqlite3.Connection, home: Path) -> list[ProposalRow]:
         " and not exists (select 1 from decision d where d.target_kind = 'proposal'"
         " and d.target_id = p.id)"
         " and not exists (select 1 from apply_log a where a.target_kind = 'proposal'"
-        " and a.target_id = p.id)",
+        " and a.target_id = p.id)"
+        " and not exists (select 1 from check_approval c where c.proposal_id = p.id)",
         tuple(sorted(latest)),
     )
     # per skill, the intents of every proposal someone decided on or tried to apply: a proposal
@@ -209,8 +210,9 @@ def _rank(p: ProposalRow) -> tuple[int, str]:
 
 def _decide(home: Path, p: ProposalRow) -> int | None:
     """Record the automatic accept, with what it decided on, only if the proposal still has no
-    decision and no apply attempt (checked in the same statement); its decision id, or None when
-    someone got there first."""
+    decision, no apply attempt and no check approval (checked in the same statement: an accept
+    would turn a check a person suspended back on, and that is a person's decision,
+    docs/enforce.md section 9); its decision id, or None when someone got there first."""
     snap = {
         "skill": p["skill_name"],
         "rule": p["rule"],
@@ -226,13 +228,15 @@ def _decide(home: Path, p: ProposalRow) -> int | None:
             "insert into decision (target_kind, target_id, action, target_snapshot, decided_at,"
             " decided_by, note) select 'proposal', ?, 'accept', ?, ?, ?, ? where not exists"
             " (select 1 from decision where target_kind = 'proposal' and target_id = ?) and not"
-            " exists (select 1 from apply_log where target_kind = 'proposal' and target_id = ?)",
+            " exists (select 1 from apply_log where target_kind = 'proposal' and target_id = ?)"
+            " and not exists (select 1 from check_approval where proposal_id = ?)",
             (
                 p["id"],
                 json.dumps(snap, ensure_ascii=False),
                 time.time(),
                 BY,
                 POLICY,
+                p["id"],
                 p["id"],
                 p["id"],
             ),
@@ -246,7 +250,12 @@ def _decide(home: Path, p: ProposalRow) -> int | None:
 def _undecide(home: Path, did: int) -> None:
     conn = store.open_db(home)
     try:
-        conn.execute("delete from decision where id = ? and decided_by = ?", (did, BY))
+        # a check a person approved meanwhile owns the decision: never suspend it from here
+        conn.execute(
+            "delete from decision where id = ? and decided_by = ? and not exists (select 1 from"
+            " check_approval c where c.proposal_id = decision.target_id)",
+            (did, BY),
+        )
         conn.commit()
     finally:
         conn.close()

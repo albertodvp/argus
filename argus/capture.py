@@ -250,7 +250,7 @@ def on_session_delete(
         return
     ph = ",".join("?" * len(ids))
     w = store.writer(hermes_internals.hermes_home())
-    for table in ("tool_outcome", "turn_outcome", "turn_intent", "run"):
+    for table in ("tool_outcome", "turn_outcome", "turn_intent", "run", "check_event"):
         w.put(f"delete from {table} where session_id in ({ph})", tuple(ids))
     # the ledger entry and the skill change outlive the session: keep the edit and its review,
     # unlinked, as backfill keeps an edit whose session is gone

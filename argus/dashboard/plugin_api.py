@@ -76,10 +76,13 @@ def _mod(name: str) -> types.ModuleType:
 if TYPE_CHECKING:
     # mypy reads the plugin modules themselves; at run time they come from _mod
     from argus import apply as apply_mod
-    from argus import cli, dbtypes, export, hermes_internals, jsontypes, store
+    from argus import checks, cli, dbtypes, export, hermes_internals, jsontypes, store
     from argus.apply import Outcome
     from argus.exporttypes import (
         ApplyBody,
+        CheckAction,
+        CheckDone,
+        CheckMode,
         DecisionAction,
         DecisionDone,
         DecisionKind,
@@ -93,9 +96,18 @@ if TYPE_CHECKING:
     )
     from argus.jsontypes import JsonObject
 else:
-    apply_mod, cli, dbtypes, export, hermes_internals, jsontypes, store = (
+    apply_mod, checks, cli, dbtypes, export, hermes_internals, jsontypes, store = (
         _mod(n)
-        for n in ("apply", "cli", "dbtypes", "export", "hermes_internals", "jsontypes", "store")
+        for n in (
+            "apply",
+            "checks",
+            "cli",
+            "dbtypes",
+            "export",
+            "hermes_internals",
+            "jsontypes",
+            "store",
+        )
     )
 
 router = APIRouter()
@@ -200,9 +212,11 @@ def _valid_id(v: object) -> TypeGuard[str]:
     return isinstance(v, str) and bool(v.strip()) and len(v) <= 300
 
 
-def _decide(raw: object) -> tuple[int, ErrorBody | DecisionDone]:
+def _decide(raw: object, who: checks.Person) -> tuple[int, ErrorBody | DecisionDone]:
     """Record (or with action `clear`, undo) a person's decision in the profile's plugin DB
-    (layer 3)."""
+    (layer 3). A proposal's decision turns its check on or off (docs/enforce.md, section 4): `who`
+    is the proof `checks.on_dashboard` made of the request, checked again by
+    checks.record_decision."""
     body = jsontypes.as_object(raw)
     if body is None:
         return 400, {"error": "expected a JSON object"}
@@ -228,18 +242,9 @@ def _decide(raw: object) -> tuple[int, ErrorBody | DecisionDone]:
             return 413, {"error": "snapshot too large"}
     conn = store.open_db(homes[prof])  # short-lived connection, never the hooks' Writer
     try:
-        if action == "clear":  # the user undoes their own click: drop that target's decisions
-            n = conn.execute(
-                "delete from decision where target_kind = ? and target_id = ?", (kind, tid)
-            ).rowcount
-        else:
-            conn.execute(
-                "insert into decision (target_kind, target_id, action, target_snapshot, "
-                "decided_at, decided_by) values (?, ?, ?, ?, ?, 'dashboard')",
-                (kind, tid, action, snapshot, time.time()),
-            )
-            n = 1
-        conn.commit()
+        n = checks.record_decision(conn, kind, tid, action, snapshot, who)
+    except checks.ApprovalError as e:
+        return 403, {"error": str(e)}
     finally:
         conn.close()
     return 200, {
@@ -249,6 +254,67 @@ def _decide(raw: object) -> tuple[int, ErrorBody | DecisionDone]:
         "target_id": tid,
         "action": action,
         "rows": n,
+    }
+
+
+_CHECK_ACTIONS: Final[dict[CheckAction, CheckMode | None]] = {
+    "approve": None,
+    "enforce": "enforce",
+    "observe": "observe",
+    "revoke": "revoked",
+}
+
+
+def _is_check_action(v: object) -> TypeGuard[CheckAction]:
+    return v in _CHECK_ACTIONS
+
+
+def _person(request: object) -> checks.Person | str:
+    """The proof of a person this route's request is (checks.on_dashboard: Hermes authorized
+    this very request object, not a string a caller passes), or why it is not."""
+    try:
+        return checks.on_dashboard(request)
+    except checks.ApprovalError as e:
+        return str(e)
+
+
+def _check(raw: object, who: checks.Person) -> tuple[int, ErrorBody | CheckDone]:
+    """A person's approval or mode change of a rule's check (docs/enforce.md, section 4), from the
+    dashboard: `who` is the proof `checks.on_dashboard` made of the request, `sha256` the hash of
+    the check the page showed, refused when it is not the current one."""
+    body = jsontypes.as_object(raw)
+    if body is None:
+        return 400, {"error": "expected a JSON object"}
+    pid, action, prof, sha = (body.get(k) for k in ("proposal_id", "action", "profile", "sha256"))
+    if not _is_check_action(action):
+        return 400, {"error": f"action must be one of {', '.join(_CHECK_ACTIONS)}"}
+    if not _valid_id(pid):
+        return 400, {"error": "proposal_id must be a non-empty string"}
+    if not isinstance(sha, str) or len(sha) != 64:
+        return 400, {"error": "sha256 must be the 64-character hash of the check shown"}
+    homes = store.profile_homes(_root())
+    if not isinstance(prof, str) or prof not in homes:
+        return 400, {"error": f"unknown profile {prof!r}"}
+    conn = store.open_db(homes[prof])  # short-lived connection, never the hooks' Writer
+    try:
+        mode = _CHECK_ACTIONS[action]
+        row = (
+            checks.approve(conn, homes[prof], pid, sha, who)
+            if mode is None
+            else checks.set_mode(conn, homes[prof], pid, mode, sha, who)
+        )
+    except checks.ApprovalError as e:
+        return 409, {"error": str(e)}
+    finally:
+        conn.close()
+    return 200, {
+        "ok": True,
+        "profile": prof,
+        "proposal_id": pid,
+        "action": action,
+        "version": row["version"],
+        "mode": row["mode"],
+        "sha256": row["sha256"],
     }
 
 
@@ -429,11 +495,30 @@ async def decision(request: Request, profile: str | None = None) -> JSONResponse
     # ?profile is added by the host's fetchJSON; the target profile is the body's `profile`
     if (stale := _stale()) is not None:
         return stale
+    if isinstance(who := _person(request), str):
+        refused: ErrorBody = {"error": who}
+        return JSONResponse(refused, status_code=403)
     try:
         body: object = json.loads(await request.body())  # what request.json() does
     except ValueError:
         return JSONResponse(_INVALID_JSON, status_code=400)
-    result: tuple[int, ErrorBody | DecisionDone] = await run_in_threadpool(_decide, body)
+    result: tuple[int, ErrorBody | DecisionDone] = await run_in_threadpool(_decide, body, who)
+    code, out = result
+    return JSONResponse(out, status_code=code)
+
+
+async def check(request: Request, profile: str | None = None) -> JSONResponse:
+    # ?profile is added by the host's fetchJSON; the target profile is the body's `profile`
+    if (stale := _stale()) is not None:
+        return stale
+    if isinstance(who := _person(request), str):
+        refused: ErrorBody = {"error": who}
+        return JSONResponse(refused, status_code=403)
+    try:
+        body: object = json.loads(await request.body())
+    except ValueError:
+        return JSONResponse(_INVALID_JSON, status_code=400)
+    result: tuple[int, ErrorBody | CheckDone] = await run_in_threadpool(_check, body, who)
     code, out = result
     return JSONResponse(out, status_code=code)
 
@@ -459,3 +544,4 @@ router.add_api_route("/status", status, methods=["GET"], response_model=None)
 router.add_api_route("/refresh", refresh, methods=["POST"])
 router.add_api_route("/decision", decision, methods=["POST"])
 router.add_api_route("/apply", apply, methods=["POST"])
+router.add_api_route("/check", check, methods=["POST"])

@@ -219,6 +219,31 @@ and the undo (reject that edit, or `hermes -p <profile> curator rollback <entry>
 
 ![An auto-applied proposal under "carried out", with its undo](assets/showcase/11-auto-applied-proposal.png)
 
+### Enforced checks
+
+A rule in `SKILL.md` is advice the model may skip. When an accepted rule forbids something a single
+tool call shows ("never force-push", "never write under ~/.ssh"), Argus can also check it on every
+call, in Hermes' `pre_tool_call` hook, outside the model. Most rules ("before X do Y", "prefer Z")
+are not checkable and stay prose.
+
+- **Draft.** derive's last stage, `checks`, asks the `argus` model once per accepted rule for a
+  check in a small closed format: one tool, one argument, one match (`command`: program, words and
+  flags in a parsed shell command; `path`: under a directory, symlinks resolved; `equals`; `tool`).
+  No code, no regular expressions. The estimate counts these calls. A draft does nothing.
+- **Approve.** Only a person: `hermes argus checks approve <id>` from their own terminal (refused
+  without a TTY, from cron, or from a command the agent runs; you type the start of the check's
+  sha256), or the check's buttons in the dashboard. Auto-apply never approves.
+- **Observe, then enforce.** An approved check starts in observe: matching calls run and count as
+  *would block*. `hermes argus checks enforce <id>` blocks them; the agent reads the rule, the check
+  and how a person lifts it. `observe` and `revoke` undo it.
+- **Deny what it cannot read.** A relative path, `$(...)`, a script piped into a shell: a match.
+  An error inside an enforced check blocks; a broken plugin DB blocks only the tools that have an
+  enforced check, never every call. A check whose stored text no longer has its approved sha256 is
+  not enforced and is shown as such.
+
+It is not a sandbox: the agent runs as you and can reach the same goal through a script, Python, or
+by editing Argus' data. Design, failure semantics and limits: [docs/enforce.md](docs/enforce.md).
+
 | | Background review | Curator | Argus |
 |---|---|---|---|
 | Unit | one turn | skill | intent |
@@ -234,9 +259,9 @@ tools, no middleware, no model calls in hooks.
 
 | Surface | What |
 |---|---|
-| Hooks | `pre_llm_call`, `post_tool_call`, `on_session_end`, `on_skill_lifecycle`, `on_session_delete`: tool and turn outcomes, the ledger entry of each `skill_manage`, cleanup of deleted sessions. They only enqueue rows on a writer thread. |
+| Hooks | `pre_llm_call`, `post_tool_call`, `on_session_end`, `on_skill_lifecycle`, `on_session_delete`: tool and turn outcomes, the ledger entry of each `skill_manage`, cleanup of deleted sessions. They only enqueue rows on a writer thread. `pre_tool_call`: the checks a person approved for accepted rules, read from the plugin DB (cached, re-read only after a commit); it blocks only for a check in enforce mode ([docs/enforce.md](docs/enforce.md)). |
 | Model slot | `auxiliary.argus` (`ctx.register_auxiliary_task`), chosen in `hermes model`; every call has a JSON schema |
-| CLI | `hermes argus backfill \| derive \| status \| export \| apply \| auto-apply` (preview), `-p <profile>` or `--all` |
+| CLI | `hermes argus backfill \| derive \| status \| export \| apply \| auto-apply` (preview) `\| checks` (`list`, `show`, `draft`; a person only: `approve`, `enforce`, `observe`, `revoke`), `-p <profile>` or `--all` |
 | Slash command | `/argus`: intent of the current session, reviews waiting (on messaging platforms only the session's intents) |
 | Dashboard | **Argus** tab, a banner on the Skills page, API at `/api/plugins/argus/` |
 | Settings | `plugins.entries.argus.settings`: `idle_minutes` (10), `interval_minutes` (60), `since_days` (30), `auto_apply` (false), `auto_apply_per_week` (3) |
@@ -254,6 +279,8 @@ only on apply, through Hermes' own functions. Storage in detail: [docs/data-mode
 - Intent assignment, judgements and edit labels are model output and can be wrong.
 - A background review whose session was deleted reads as `curator`: the ledger does not record the
   write origin.
+- Enforced checks see one argument of one call; they are not a sandbox (see
+  [docs/enforce.md](docs/enforce.md), "Threat model and known limits").
 
 ## Development
 
@@ -276,7 +303,7 @@ Without Nix: uv 0.13.0, just and Node.js with npm.
 | `argus/` | the plugin (schema in `argus/schema.sql`) |
 | `tests/`, `typings/` | checks and Hermes stubs |
 | `bench/` | reproducible numbers: fixture, cassette, expected numbers ([bench/README.md](bench/README.md)) |
-| `docs/` | [intents](docs/intents.md), [Hermes' learning loop](docs/hermes-learning-loop.md), [data model](docs/data-model.md), [showcase](docs/showcase.md) |
+| `docs/` | [intents](docs/intents.md), [Hermes' learning loop](docs/hermes-learning-loop.md), [data model](docs/data-model.md), [enforced checks](docs/enforce.md), [showcase](docs/showcase.md) |
 | `assets/` | mark, wordmark, banner, screenshots |
 
 ## Reproducible numbers

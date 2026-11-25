@@ -665,8 +665,8 @@ function changeRow(hk, c) {
     // verbatim excerpts of the cited intents' turns, checked by derive (none before proposals/v2)
     const quotes = (p.quotes || []).filter(q => m.I[q.intent] !== undefined);
     return `<details class="ch plugin ${dec ? 'd-' + tok(dec) : ''}" id="e-${esc(c.id)}" data-k="${esc(k)}" ${isOpen(k)}><summary>
-      <span class="cdot"></span><span class="cw">proposed</span><span class="ctags"><span class="tag c-${tok(p.confidence)}" data-tip="model confidence">${esc(p.confidence)}</span>${applyTag('proposal', p.profile, p.id, p)}</span><span class="crule">${clip(c.rule, 60)}</span><span class="cd"><span class="add">+${c.plus}</span></span></summary>
-      <div class="cb"><div class="p">${esc(c.why)}</div>${applyLine('proposal', p.profile, p.id, p)}
+      <span class="cdot"></span><span class="cw">proposed</span><span class="ctags"><span class="tag c-${tok(p.confidence)}" data-tip="model confidence">${esc(p.confidence)}</span>${applyTag('proposal', p.profile, p.id, p)}${checkTag(p)}</span><span class="crule">${clip(c.rule, 60)}</span><span class="cd"><span class="add">+${c.plus}</span></span></summary>
+      <div class="cb"><div class="p">${esc(c.why)}</div>${applyLine('proposal', p.profile, p.id, p)}${checkBlock(p)}
         <div class="ev2">${(p.intents || []).map(id => m.I[id]).filter(i => i !== undefined).map(i => `<a class="chip" href="#/${upart(hk)}/intents/${upart(i.id)}"><span class="dot s-${tok(i.status)}"></span>${esc(i.title)}</a>`).join('')}
           ${pats.map(s => `<a class="chip" href="#/${upart(hk)}/overview?sig=${upart(s.k)}">${catTag(s.cat)} ${s.hits}× ${esc((s.tool === 'runtime' ? '' : s.tool + ': ') + s.sig).slice(0, 70)}</a>`).join('')}
           ${jsonList(p.overlaps || []).map(o => m.h.learnings.find(e => e.entry === o)).filter(e => e !== undefined).map(e => `<a class="chip" href="javascript:void 0" data-goto="${esc(e.id)}" data-tip="${esc(cut(e.review?.learned || '', 80))}">overlaps hermes edit ${when(e.ts)}</a>`).join('')}</div>
@@ -697,6 +697,71 @@ function changeRow(hk, c) {
       <div class="acts"><button class="btn keep ${dec === 'keep' ? 'on' : ''}" data-dec="keep" data-id="${esc(e.id)}" data-prof="${esc(e.profile)}">keep</button>
         <button class="btn rej ${dec === 'reject' ? 'on' : ''}" data-dec="reject" data-id="${esc(e.id)}" data-prof="${esc(e.profile)}" data-tip="adds a rollback to the dock; nothing runs until apply">reject</button>
 </div></div></details>`;
+}
+// ---------------------------------------------------------------- a rule's enforced check (docs/enforce.md)
+/** @type {Record<Argus.CheckState, string>} */
+const CHECK_WORD = { undrafted: 'not drafted', uncheckable: 'not checkable', draft: 'check drafted', observe: 'observed', enforce: 'enforced',
+  revoked: 'revoked', suspended: 'suspended', unverified: 'hash mismatch' };
+/** @type {Record<Argus.CheckState, string>} */
+const CHECK_CLASS = { undrafted: 't-unrev', uncheckable: 't-unrev', draft: 't-review', observe: 't-ok', enforce: 't-failed', revoked: 't-unrev', suspended: 't-unrev', unverified: 't-failed' };
+const CHECK_TIP = 'A check is the deterministic form of an accepted rule: one tool, one argument, one match. Argus evaluates it on every call of that tool before it runs (pre_tool_call), outside the model. '
+  + 'The argus model drafts it during derive; only a person approves it (here, or `hermes argus checks approve` in a terminal). Approved checks start in observe: matching calls run and count as "would block". '
+  + 'In enforce, matching calls are blocked and count as "blocked". A call whose argument Argus cannot read (relative path, $(...)) counts as a match. '
+  + 'Not checkable: rules about order, preference or judgement stay in SKILL.md only. Suspended: the rule is no longer accepted. Hash mismatch: the stored check changed after its approval, so it is not enforced.';
+/** @type {readonly Argus.CheckAction[]} */
+const CHECK_ACTIONS = ['approve', 'enforce', 'observe', 'revoke'];
+/** @param {string | undefined} v @returns {v is Argus.CheckAction} */
+const isCheckAction = v => CHECK_ACTIONS.some(a => a === v);
+/** @type {Record<Argus.CheckAction, string>} */
+const CHECK_NOTE = { approve: 'Approves exactly this check (sha256 above) in observe mode: matching calls still run and are recorded as would block.',
+  enforce: 'From the next tool call on, calls this check matches are blocked; the agent reads why and how a person lifts it.',
+  observe: 'Matching calls run again; they are recorded as would block.', revoke: 'The check is no longer evaluated. Approving it again starts in observe.' };
+/** The check's state in the summary of an accepted rule; nothing before it is drafted. @param {Argus.Proposal} p */
+function checkTag(p) {
+  const c = p.check;
+  if (!c || c.state === 'undrafted' || c.state === 'uncheckable') return '';
+  return `<span class="tag ${CHECK_CLASS[c.state]}" data-tip="${esc(cut(`check: ${c.approval?.describe || c.draft_describe}`, 80))}">${CHECK_WORD[c.state]}</span>`;
+}
+/** @param {Argus.Proposal} p @param {Argus.CheckAction} action @param {string} sha @param {string} label */
+const checkBtn = (p, action, sha, label) => `<button class="btn ${action === 'revoke' ? 'rej' : ''}" data-chk="${action}" data-id="${esc(p.id)}" data-prof="${esc(p.profile)}" data-sha="${esc(sha)}">${label}</button>`;
+/** The buttons a person has on a rule's check now. @param {Argus.Proposal} p @param {Argus.RuleCheck} c */
+function checkButtons(p, c) {
+  const a = c.approval, out = [];
+  if (c.draft && c.draft_sha256 && (!a || a.mode === 'revoked' || !a.hash_ok || c.stale)) out.push(checkBtn(p, 'approve', c.draft_sha256, a && a.mode !== 'revoked' ? 'approve new draft' : 'approve check'));
+  if (a && a.hash_ok && a.mode === 'observe' && c.state === 'observe') out.push(checkBtn(p, 'enforce', a.sha256, 'enforce'));
+  if (a && a.mode === 'enforce') out.push(checkBtn(p, 'observe', a.sha256, 'observe only'));
+  if (a && a.mode !== 'revoked') out.push(checkBtn(p, 'revoke', a.sha256, 'revoke'));
+  return out.length ? `<div class="acts">${out.join('')}</div>` : '';
+}
+/** A rule's check in its opened row: what it matches, its mode, would-block / blocked calls, the person's buttons. @param {Argus.Proposal} p */
+function checkBlock(p) {
+  const c = p.check;
+  if (!c) return '';
+  const k = `chk-${tok(p.profile)}-${tok(p.id)}`, a = c.approval;
+  const what = a ? a.describe : c.draft_describe || c.reason || 'not drafted yet: the next derive drafts it';
+  const counts = a ? ` <span class="dim">·</span> <span class="w">${c.would_block} would block</span> <span class="dim">·</span> <span class="e">${c.blocked} blocked</span>` : '';
+  const why = c.reason && (c.state === 'uncheckable' || !a) && c.reason !== what ? `<div class="lin"><span class="lk"></span><span class="dim">${esc(c.reason)}</span></div>` : '';
+  const stale = c.stale ? '<div class="lin w"><span class="lk"></span>a newer draft differs from the approved check</div>' : '';
+  const ev = c.events.slice(0, 5).map(e => `<div class="lin"><span class="lk"></span><span class="dim">${when(e.ts)} ${esc(e.outcome)} (${esc(e.cause)}) ${esc(e.tool)}: ${esc(cut(e.detail, 140))}</span></div>`).join('');
+  return `<div class="lin"><span class="lk">check ${hintBtn(k)}</span><span class="tag ${CHECK_CLASS[c.state]}">${CHECK_WORD[c.state]}${a ? ` v${a.version}` : ''}</span><span>${esc(what)}</span>${counts}</div>${hintBody(k, `<p>${esc(CHECK_TIP)}</p>`)}${why}${stale}${ev}${checkButtons(p, c)}`;
+}
+/** A person's click on a check button: confirm in the dialog, then POST /check with the hash shown.
+ * @param {string | undefined} action @param {string | undefined} id @param {string | undefined} prof @param {string | undefined} sha */
+async function checkAction(action, id, prof, sha) {
+  if (!isCheckAction(action) || !id || !prof || !sha) return;
+  const p = Object.values(must(HS)).flatMap(h => h.proposals || []).find(x => x.id === id && x.profile === prof), c = p?.check;
+  if (!p || !c) return;
+  const text = action === 'approve' ? c.draft || '' : c.approval?.spec || '';
+  const ok = await confirmAsk({ title: `${action} the check of this rule`, tone: action === 'revoke' || action === 'observe' ? 'danger' : 'go', ok: action,
+    facts: [['profile', prof], ['rule', cut(p.rule, 200)], ['now', CHECK_WORD[c.state]], ['sha256', sha]],
+    preview: { label: 'check', text, diff: false }, notes: [CHECK_NOTE[action]] });
+  if (!ok) return;
+  /** @type {Argus.CheckBody} */
+  const body = { profile: prof, proposal_id: id, action, sha256: sha };
+  try {
+    await api('/api/plugins/argus/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  } catch (err) { showError(`check ${action} failed: ${errMsg(err)}`); }
+  load();   // the approval row and the sidecar changed: re-fetch
 }
 /** The proposal this edit carried out: a proposal whose latest successful apply wrote this edit's ledger entry,
  * rolled back since or not (a rolled-back one is listed with the proposals again).
@@ -1121,13 +1186,14 @@ document.addEventListener('toggle', e => {
 }, true);
 document.addEventListener('click', e => {
   if (!(e.target instanceof Element)) return;
-  const t = dataEl(e.target.closest('[data-x],[data-hint],[data-dec],[data-pdec],[data-dock],[data-dockgrp],[data-clear],[data-goto],[data-expand],[data-copy],[data-copyrow],[data-apply],[data-export],[data-href],a[href^="#t-"]'));
+  const t = dataEl(e.target.closest('[data-x],[data-hint],[data-dec],[data-pdec],[data-chk],[data-dock],[data-dockgrp],[data-clear],[data-goto],[data-expand],[data-copy],[data-copyrow],[data-apply],[data-export],[data-href],a[href^="#t-"]'));
   if (!t) return;
   // disclosures change the page in place (no render): a row's ▸/▾, a section's '?'
   if (t.dataset.x !== undefined) { const k = t.dataset.x, on = !OPEN.has(k); if (on) OPEN.add(k); else OPEN.delete(k);
     t.setAttribute('aria-expanded', String(on)); t.textContent = on ? '▾' : '▸'; t.closest('[data-xrow]')?.classList.toggle('xo', on); return; }
   if (t.dataset.hint !== undefined) { const k = 'hint:' + t.dataset.hint, on = !OPEN.has(k); if (on) OPEN.add(k); else OPEN.delete(k);
     t.setAttribute('aria-expanded', String(on)); document.getElementById('hb-' + t.dataset.hint)?.classList.toggle('on', on); return; }
+  if (t.dataset.chk) { checkAction(t.dataset.chk, t.dataset.id, t.dataset.prof, t.dataset.sha); return; }
   if (t.dataset.pdec) { decide('proposal', t.dataset.id, t.dataset.prof, t.dataset.pdec, pkey(t.dataset.prof, t.dataset.id), () => { const y = scrollY; render(); scrollTo(0, y); }); return; }
   if (t.matches('a[href^="#t-"]')) { e.preventDefault(); const el = document.getElementById(must(t.getAttribute('href')).slice(1)); if (el) { el.closest('details')?.setAttribute('open', ''); el.scrollIntoView({ block: 'center' }); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1200); } return; }
   if (t.dataset.dock) { sessionStorage.setItem('argus-dock', sessionStorage.getItem('argus-dock') === 'open' ? 'closed' : 'open'); dock(); return; }

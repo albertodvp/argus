@@ -1,6 +1,7 @@
 """Derivation passes over one Hermes install, per profile (README "Intents" and "Learning").
 
-Stages, in order: assign, consolidate, judge, runs, edit_review, proposals. They read state.db and
+Stages, in order: assign, consolidate, judge, runs, edit_review, proposals, checks (drafts of
+enforced checks for accepted rules, docs/enforce.md). They read state.db and
 the curator ledger through hermes_data (read-only) and write only layer 2 of the plugin DB plus the
 derived columns of skill_edit. Every model call goes through the injected `llm(instructions, text,
 schema, purpose) -> dict | None`; a failed call is logged and its unit of work skipped, never fatal.
@@ -29,12 +30,13 @@ from typing import Final, Literal, NotRequired, TypeAlias, TypeGuard, TypeVar
 from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypedDict
 
-from . import auto, hermes_data, prompts, signals, store
+from . import auto, checks, hermes_data, prompts, signals, store
 from .dbtypes import (
     INTENT_ROW,
     RUN_ROW,
     SKILL_EDIT_ROW,
     IntentRow,
+    ProposalRow,
     RunRow,
     SkillEditRow,
     query_as,
@@ -46,7 +48,15 @@ from .jsontypes import JsonObject, as_number, as_object, loads, loads_object
 
 T = TypeVar("T")
 
-STAGES: Final = ("assign", "consolidate", "judge", "runs", "edit_review", "proposals")
+STAGES: Final = (
+    "assign",
+    "consolidate",
+    "judge",
+    "runs",
+    "edit_review",
+    "proposals",
+    "checks",
+)
 V_ASSIGN: Final = "assign/v1"
 V_CONS: Final = "consolidate/v1"
 V_JUDGE: Final = "judge/v1"
@@ -214,7 +224,8 @@ class Estimate(TypedDict):
     learn: int  # skill edits whose run state.db does not hold (no-run): one call each, on the diff
     unread: int  # ledger entries derive reads first (not backfilled yet): up to one call each
     due: int  # intents and runs already due for judging, before the new turns land in intents
-    calls: int  # assign + review + learn + due: the calls known now
+    checks: int  # accepted rules without a drafted check: one call each (stage checks)
+    calls: int  # assign + review + learn + due + checks: the calls known now
     new: int  # up to: judging the intents the new turns land in, and their runs
     most: int  # calls + unread + new + consolidate and proposals: what the pass can reach
 
@@ -1812,6 +1823,29 @@ def patch(text: str, rule: str, llm: Calls) -> str | None:
     return signals.unified("\n".join(lines), "\n".join(new))
 
 
+# ---------------------------------------------------------------- 7 checks (docs/enforce.md)
+def draft_checks(conn: sqlite3.Connection, llm: Calls, rules: list[ProposalRow]) -> Stats:
+    """Draft the check of each rule in `rules`: one model call each. The draft is inert until a
+    person approves it (checks.approve); an answer that does not parse is recorded as refused."""
+    stats = {"drafted": 0, "uncheckable": 0, "refused": 0}
+    for p in rules:
+        r = llm.ask(
+            checks.DRAFT_ANSWER,
+            prompts.CHECK_SYS,
+            checks.draft_input(conn, p),
+            prompts.CHECK_SCHEMA,
+            "argus.check",
+        )
+        if r is not None:
+            stats[checks.save_draft(conn, p["id"], r)] += 1
+    return stats
+
+
+def draft_stage(px: Profile, llm: Calls) -> Stats:
+    """Stage `checks`: draft the accepted rules that have no draft yet."""
+    return draft_checks(px.conn, llm, checks.to_draft(px.conn))
+
+
 # ---------------------------------------------------------------- estimate
 def skipped(home: Path, start: float | None) -> bool:
     """Whether derive skips a profile (UNBACKFILLED); `start` is its window (store.read_window)."""
@@ -1874,6 +1908,7 @@ def estimate(home: Path) -> Estimate | None:
             cur = as_number(loads_object(raw).get("ledger_ts"))
         except ValueError:
             cur = None
+        drafts = len(checks.to_draft(conn))
     finally:
         conn.close()
     unread = sum(
@@ -1882,7 +1917,7 @@ def estimate(home: Path) -> Estimate | None:
         if e.get("skill") and e["id"] not in known
     )
     review, learn = steps.count("review"), steps.count("no_run")
-    calls = assign_calls + review + learn + due
+    calls = assign_calls + review + learn + due + drafts
     new = 2 * opening + len(routines)
     cons = -(-4 * opening // CONS_CHUNK)  # touched intents and up to 3 neighbours each, per call
     return Estimate(
@@ -1891,6 +1926,7 @@ def estimate(home: Path) -> Estimate | None:
         learn=learn,
         unread=unread,
         due=due,
+        checks=drafts,
         calls=calls,
         new=new,
         most=calls + unread + new + cons + 1,  # + the proposals pass
@@ -1902,6 +1938,7 @@ def estimate_lines(est: Estimate, window: Literal["set", "widened"] | None = Non
     `window`: this backfill just set or widened the window the estimate covers."""
     due = f", {est['due']} intents and runs due for judging" if est["due"] else ""
     unread = f", {est['unread']} new ledger entries" if est["unread"] else ""
+    due += f", {est['checks']} accepted rules to draft checks for" if est["checks"] else ""
     lines = [
         (
             f"next derive: about {est['calls']} model calls known now, up to {est['most']}"
@@ -1953,6 +1990,7 @@ def run(
         "runs": runs,
         "edit_review": edit_review,
         "proposals": lambda px, c: proposals(px, c, force=force_proposals),
+        "checks": draft_stage,
     }
     for name, home in store.profile_homes(root).items():
         if report.get("aborted"):

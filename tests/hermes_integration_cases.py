@@ -8,14 +8,24 @@ are imported, so this file imports Argus, and through it Hermes, only once that 
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 import json
 import os
+import shutil
+import sqlite3
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Protocol, cast
 
-from argus import apply, auto, hermes_internals, store
+from hermes_cli import plugin_host_http_auth, plugins
+from starlette.applications import Starlette
+from starlette.requests import Request
+
+from argus import apply, auto, checks, hermes_internals, store
+from argus.dbtypes import count
 from argus.jsontypes import JsonList, JsonObject
 
 CONFIG = (
@@ -432,6 +442,175 @@ def case_auto_apply_then_a_rollback_stops_it(tmp: Path) -> None:
     assert _snapshot(md) == before
 
 
+def _events(home: Path, want: int) -> int:
+    """check_event rows, once the hook's writer (in the plugin as Hermes loaded it) wrote `want`."""
+    n = 0
+    for _ in range(100):
+        conn = sqlite3.connect(store.db_path(home))
+        try:
+            n = count(conn, "select count(*) from check_event")
+        finally:
+            conn.close()
+        if n >= want:
+            break
+        time.sleep(0.05)
+    return n
+
+
+def _person() -> str | None:
+    return None
+
+
+def _no_cache(_dir: str, names: list[str]) -> set[str]:
+    return {n for n in names if n == "__pycache__"}
+
+
+def case_pre_tool_call_enforces_an_approved_check(tmp: Path) -> None:
+    """Argus as Hermes loads it (plugin.yaml, register): Hermes' own pre_tool_call dispatch lets
+    an observed check's call run, and blocks it once a person set the check to enforce."""
+    home = _profile(tmp, extra="plugins:\n  enabled:\n    - argus\n")
+    src = Path(__file__).resolve().parent.parent / "argus"
+    shutil.copytree(src, home / "plugins" / "argus", ignore=_no_cache)
+    _propose(home, "p1", "sk", None, rule="Never force-push.")
+    # the person gate refuses this test process (no TTY, maybe inside an agent): a person is
+    # assumed here; the gate is unit-tested (tests/test_checks.py)
+    setattr(checks, "refusal_here", _person)  # noqa: B010
+    conn = store.open_db(home)
+    try:
+        answer: checks.DraftAnswer = {
+            "checkable": True,
+            "reason": "one terminal command",
+            "tool": "terminal",
+            "field": "command",
+            "match": "command",
+            "program": "git",
+            "args": ["push"],
+            "flags": ["--force", "-f"],
+        }
+        assert checks.save_draft(conn, "p1", answer) == "drafted"
+        draft = checks.draft_of(conn, "p1")
+        assert draft is not None
+        sha = str(draft["sha256"])
+        checks.approve(conn, home, "p1", sha, checks.at_terminal())
+    finally:
+        conn.close()
+    plugins.discover_plugins()
+    assert plugins.has_hook("pre_tool_call")
+    push: dict[str, object] = {"command": "git push origin main --force"}
+    assert plugins.resolve_pre_tool_block("terminal", push, tool_call_id="c1") is None  # observe
+    assert _events(home, 1) == 1
+    conn = store.open_db(home)
+    try:
+        checks.set_mode(conn, home, "p1", "enforce", sha, checks.at_terminal())
+    finally:
+        conn.close()
+    msg = plugins.resolve_pre_tool_block("terminal", push, tool_call_id="c2")
+    assert msg is not None, "not blocked"
+    assert "Argus blocked this terminal call: check p1 v1" in msg, msg
+    assert "checks observe p1" in msg, msg
+    status: dict[str, object] = {"command": "git status"}
+    assert plugins.resolve_pre_tool_block("terminal", status, tool_call_id="c3") is None
+    assert plugins.resolve_pre_tool_block("read_file", push, tool_call_id="c4") is None
+    assert _events(home, 2) == 2
+
+
+class _DashboardServer(Protocol):
+    """`hermes_cli.web_server` as this case reads it: the dashboard's FastAPI app."""
+
+    app: Starlette
+
+
+def _dashboard_request(server: _DashboardServer, token: str) -> Request:
+    scope: dict[str, object] = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/plugins/argus/check",
+        "query_string": b"",
+        "headers": [(b"x-hermes-session-token", token.encode())],
+        "app": server.app,
+    }
+    return Request(scope)
+
+
+def _refusal(fn: Callable[[], object]) -> str:
+    """The ApprovalError `fn` raises (AssertionError when it does not)."""
+    try:
+        fn()
+    except checks.ApprovalError as e:
+        return str(e)
+    raise AssertionError("not refused")
+
+
+def case_dashboard_proof_is_hermes_route_guard(tmp: Path) -> None:
+    """checks.on_dashboard asks Hermes' own dashboard route guard (web_server._require_token):
+    in a process that serves the dashboard, a request with its session token is a person's proof
+    and approves; a wrong token, or a process without the dashboard, is refused."""
+    home = _profile(tmp)
+    _propose(home, "p1", "sk", None, rule="Never force-push.")
+    # this test process may run inside an agent: the session part of the gate is unit-tested
+    setattr(checks, "agent_session", _person)  # noqa: B010
+    empty: dict[str, object] = {"type": "http", "headers": []}
+    probe = Request(empty)
+    assert not hermes_internals.dashboard_request_authorized(probe)  # no dashboard here yet
+    os.environ["HERMES_DASHBOARD_SESSION_TOKEN"] = "argus-integration-token"
+    server = cast("_DashboardServer", importlib.import_module("hermes_cli.web_server"))
+    refused = _refusal(lambda: checks.on_dashboard(_dashboard_request(server, "wrong")))
+    assert "not a request the Hermes dashboard authenticated" in refused, refused
+    who = checks.on_dashboard(_dashboard_request(server, "argus-integration-token"))
+    conn = store.open_db(home)
+    try:
+        answer: checks.DraftAnswer = {
+            "checkable": True,
+            "reason": "one terminal command",
+            "tool": "terminal",
+            "field": "command",
+            "match": "command",
+            "program": "git",
+            "args": ["push"],
+            "flags": ["--force", "-f"],
+        }
+        assert checks.save_draft(conn, "p1", answer) == "drafted"
+        draft = checks.draft_of(conn, "p1")
+        assert draft is not None
+        row = checks.approve(conn, home, "p1", str(draft["sha256"]), who)
+        assert row["decided_by"] == "dashboard", row
+    finally:
+        conn.close()
+
+
+def case_hosted_dashboard_proof_uses_hermes_admission(tmp: Path) -> None:
+    """With `plugins.isolation: host`, the Argus API runs in Hermes' plugin host and Hermes hands
+    it the dashboard server's guard decision in the request's ASGI state: on_dashboard accepts a
+    request Hermes admitted and refuses one it did not."""
+    _profile(tmp)
+    setattr(checks, "agent_session", _person)  # noqa: B010
+    seen: list[str] = []
+
+    async def app(
+        scope: dict[str, object],
+        receive: Callable[[], Awaitable[object]],
+        send: Callable[[object], Awaitable[None]],
+    ) -> None:
+        request = Request(scope)
+        try:
+            checks.on_dashboard(request)
+            seen.append("admitted")
+        except checks.ApprovalError as e:
+            seen.append(str(e))
+
+    async def receive() -> object:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(_message: object) -> None:
+        return None
+
+    for authenticated in (True, False):
+        scoped = plugin_host_http_auth.with_hosted_admission(app, authenticated)
+        asyncio.run(scoped({"type": "http", "headers": []}, receive, send))
+    assert seen[0] == "admitted", seen
+    assert "not a request the Hermes dashboard authenticated" in seen[1], seen
+
+
 CASES: dict[str, Callable[[Path], None]] = {
     f.__name__.removeprefix("case_"): f
     for f in (
@@ -455,6 +634,9 @@ CASES: dict[str, Callable[[Path], None]] = {
         case_support_copy_does_not_block,
         case_every_profile_from_one_process,
         case_auto_apply_then_a_rollback_stops_it,
+        case_pre_tool_call_enforces_an_approved_check,
+        case_dashboard_proof_is_hermes_route_guard,
+        case_hosted_dashboard_proof_uses_hermes_admission,
     )
 }
 

@@ -1,5 +1,5 @@
-"""`hermes argus status|backfill|derive|export|apply`, the `/argus` slash command, the llm adapter
-for derive.run and the idle-triggered detached derive."""
+"""`hermes argus status|backfill|derive|export|apply|checks` (checks: argus/checks_cli.py), the
+`/argus` slash command, the llm adapter for derive.run and the idle-triggered detached derive."""
 
 from __future__ import annotations
 
@@ -21,7 +21,18 @@ from typing import Final, Literal, SupportsFloat, SupportsIndex, TextIO, TypeAli
 
 from pydantic import TypeAdapter
 
-from . import apply, auto, backfill, cassette, derive, export, hermes_data, hermes_internals, store
+from . import (
+    apply,
+    auto,
+    backfill,
+    cassette,
+    checks_cli,
+    derive,
+    export,
+    hermes_data,
+    hermes_internals,
+    store,
+)
 from .dbtypes import count, query, sql_value
 from .hermes_api import CliHandler, Llm, LlmFn, PluginContext
 from .jsontypes import JsonObject, JsonValue, as_object, closed_schema, loads_object
@@ -51,6 +62,9 @@ TABLES: Final = (
     "proposal",
     "decision",
     "apply_log",
+    "check_draft",
+    "check_approval",
+    "check_event",
 )
 
 
@@ -315,7 +329,7 @@ class IdleScheduler:
 # ---------------------------------------------------------------- CLI
 def setup(parser: argparse.ArgumentParser) -> None:
     sub = parser.add_subparsers(
-        dest="argus_cmd", metavar="{status,backfill,derive,export,apply,auto-apply}"
+        dest="argus_cmd", metavar="{status,backfill,derive,export,apply,auto-apply,checks}"
     )
     sub.add_parser(
         "status",
@@ -348,7 +362,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
         "--stage",
         action="append",
         help="run only this stage (repeatable): assign, consolidate, judge, "
-        "runs, edit_review, proposals",
+        "runs, edit_review, proposals, checks",
     )
     p.add_argument("--quiet", action="store_true", help="no progress output")
     g = p.add_mutually_exclusive_group()
@@ -410,6 +424,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
         help="show what the auto_apply policy would apply in this profile now, even with the"
         " setting off; writes nothing (with auto_apply on, derive applies it after each pass)",
     )
+    checks_cli.setup(sub)
 
 
 _STRS: Final = TypeAdapter[list[str]](list[str])
@@ -722,6 +737,7 @@ def make_handler(ctx: PluginContext) -> CliHandler:
         if cmd == "status":
             print(status(root, home))
             print(auto_status(home, *auto_policy(ctx)))
+            print(checks_cli.status_line(home))
             return 0
         if cmd == "backfill":
             since = _arg_float(args, "since")  # explicit: --since 0 asks for the whole history
@@ -741,6 +757,8 @@ def make_handler(ctx: PluginContext) -> CliHandler:
             return run_export(root, _arg_str(args, "out"), _arg_strs(args, "only_profile"))
         if cmd == "apply":
             return run_apply(home, args)
+        if cmd == "checks":
+            return checks_cli.run(home, args, lambda: make_llm(ctx))
         if cmd == "auto-apply":
             print(auto_status(home, *auto_policy(ctx)).strip())
             return run_auto(home, auto_policy(ctx)[1], dry_run=True)

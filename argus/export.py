@@ -16,7 +16,7 @@ from typing import Final, TypeAlias
 from pydantic import TypeAdapter
 from typing_extensions import TypedDict
 
-from . import apply, derive, hermes_data, signals, store
+from . import apply, checks, derive, hermes_data, signals, store
 from .dbtypes import (
     APPLY_LOG_ROW,
     INTENT_ROW,
@@ -41,6 +41,7 @@ from .exporttypes import (
     Learning,
     Proposal,
     Quote,
+    RuleCheck,
     Run,
     RunOutcome,
     RunStatus,
@@ -102,6 +103,7 @@ class _PluginRows(TypedDict):
     # a staged success later than `applied` whose pending write is gone: approved or rejected
     released: dict[_Target, ApplyAttempt]
     attempts: dict[_Target, ApplyAttempt]
+    checks: dict[str, RuleCheck]  # proposal id -> its check (docs/enforce.md)
 
 
 def _empty_rows() -> _PluginRows:
@@ -116,6 +118,7 @@ def _empty_rows() -> _PluginRows:
         "applied": {},
         "released": {},
         "attempts": {},
+        "checks": {},
     }
 
 
@@ -147,6 +150,9 @@ def _plugin_rows(home: Path) -> _PluginRows:
         for r in query_as(conn, RUN_ROW, "select * from run"):
             out["runs"][(r["intent_id"], r["session_id"])] = r
         out["proposals"] = query_as(conn, PROPOSAL_ROW, "select * from proposal")
+        for pr in out["proposals"]:
+            if (rc := checks.rule_check(conn, pr["id"])) is not None:
+                out["checks"][pr["id"]] = rc
         for d in query_as(
             conn,
             _DECISION_ROW,
@@ -671,6 +677,7 @@ def _proposals(
                     "read_only": (f := present.get(pr["skill_name"])) is not None
                     and not pr["is_new_skill"]
                     and not store.skill_writable(f),
+                    "check": p["checks"].get(pr["id"]),
                 }
             )
     return proposals

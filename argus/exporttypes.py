@@ -20,6 +20,12 @@ __all__ = [
     "ApplyBody",
     "ApplyOutcome",
     "BlameLine",
+    "CheckAction",
+    "CheckApproval",
+    "CheckDone",
+    "CheckEvent",
+    "CheckMode",
+    "CheckState",
     "Child",
     "DecisionAction",
     "DecisionDone",
@@ -37,6 +43,7 @@ __all__ = [
     "Quote",
     "RefreshBody",
     "Review",
+    "RuleCheck",
     "Run",
     "RunError",
     "RunOutcome",
@@ -51,6 +58,14 @@ DecisionKind: TypeAlias = Literal["skill_edit", "proposal"]
 DecisionAction: TypeAlias = Literal["keep", "reject", "accept", "dismiss"]
 ApplyOutcome: TypeAlias = Literal["applied", "staged", "refused", "failed", "unknown"]
 RunStatus: TypeAlias = Literal["failed", "silent", "reported", "empty"]
+CheckMode: TypeAlias = Literal["observe", "enforce", "revoked"]
+CheckAction: TypeAlias = Literal["approve", "observe", "enforce", "revoke"]
+CheckState: TypeAlias = Literal[
+    "undrafted", "uncheckable", "draft", "observe", "enforce", "revoked", "suspended", "unverified"
+]
+"""What a rule's check is now (docs/enforce.md): undrafted (accepted, no draft yet), uncheckable,
+draft (not approved), observe | enforce | revoked (the approval in force), suspended (approved,
+but the rule is no longer accepted), unverified (the stored check no longer matches its sha256)."""
 
 
 # ---------------------------------------------------------------- /data (export.build)
@@ -192,6 +207,47 @@ class Quote(TypedDict):
     role: str  # the quoted message's role: user or tool
 
 
+class CheckApproval(TypedDict):
+    """The approval of a rule's check in force (the latest check_approval row)."""
+
+    version: int
+    mode: CheckMode
+    spec: str  # canonical JSON as approved
+    describe: str
+    sha256: str
+    hash_ok: bool  # the stored text still has the approved sha256
+    at: float
+    by: str  # cli | dashboard
+
+
+class CheckEvent(TypedDict):
+    """A call a check matched (check_event)."""
+
+    ts: float
+    outcome: str  # would_block | blocked | unverified
+    cause: str  # match | unknown | error | hash
+    tool: str
+    detail: str
+    sid: str | None
+
+
+class RuleCheck(TypedDict):
+    """A rule's deterministic check (docs/enforce.md): draft, approval, events."""
+
+    state: CheckState
+    draft: str | None  # canonical JSON of the latest draft; None: none, or not checkable
+    draft_sha256: str | None
+    draft_describe: str
+    reason: str  # the drafting model's reason, or why the parser refused its check
+    drafted_at: float | None
+    approval: CheckApproval | None
+    stale: bool  # a draft differs from the approved check
+    would_block: int
+    blocked: int
+    unverified: int
+    events: list[CheckEvent]  # newest first, at most 10
+
+
 class Proposal(TypedDict):
     id: str
     skill: str
@@ -212,6 +268,7 @@ class Proposal(TypedDict):
     last_attempt: ApplyAttempt | None
     skill_gone: bool  # an existing-skill proposal whose skill is no longer in the profile
     read_only: bool  # its skill's SKILL.md cannot be written here (e.g. a read-only external dir)
+    check: RuleCheck | None  # None: not accepted, and no check drafted or approved
 
 
 class SkillAbsence(TypedDict):
@@ -304,6 +361,18 @@ class DecisionDone(TypedDict):
     target_id: str
     action: DecisionAction | Literal["clear"]
     rows: int
+
+
+class CheckDone(TypedDict):
+    """/check: the approval row a person's action wrote."""
+
+    ok: Literal[True]
+    profile: str
+    proposal_id: str
+    action: CheckAction
+    version: int
+    mode: CheckMode
+    sha256: str
 
 
 ApplyBody: TypeAlias = Mapping[str, object]

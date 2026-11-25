@@ -27,6 +27,9 @@ CONTRACT: dict[str, frozenset[str]] = {
         BlameLine,
         exporttypes.Session,
         exporttypes.Trend,
+        exporttypes.CheckApproval,
+        exporttypes.CheckEvent,
+        exporttypes.RuleCheck,
         exporttypes.Proposal,
         exporttypes.Quote,
         exporttypes.SkillAbsence,
@@ -37,6 +40,7 @@ CONTRACT: dict[str, frozenset[str]] = {
         exporttypes.LastDerive,
         exporttypes.RunError,
         exporttypes.Status,
+        exporttypes.CheckDone,
     )
 }
 # /apply answers apply.ApplyResult plus the profile the plugin API adds
@@ -44,8 +48,9 @@ CONTRACT["ApplyResult"] = apply.ApplyResult.__required_keys__ | {
     *apply.ApplyResult.__optional_keys__,
     "profile",
 }
-# the /decision body app.js sends; plugin_api._decide checks it field by field
-REQUEST_ONLY: frozenset[str] = frozenset({"DecisionBody"})
+# the /decision and /check bodies app.js sends; plugin_api._decide and _check check them field by
+# field
+REQUEST_ONLY: frozenset[str] = frozenset({"DecisionBody", "CheckBody"})
 
 
 def interfaces() -> dict[str, set[str]]:
