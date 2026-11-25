@@ -67,6 +67,56 @@ def clean_text(c: str) -> tuple[str | None, str, KindHint]:
     return (c or None), view, ""
 
 
+# Hermes' skill scaffolding (agent/skill_commands.py): a /skill or /bundle turn, or a channel's
+# auto-loaded skill, arrives as a user message embedding whole skill bodies around what the person
+# typed. Markers byte-identical to Hermes' builders.
+SKILL_INVOKED: Final = "[IMPORTANT: The user has invoked the "
+SKILL_LOADED: Final = "The full skill content is loaded below.]"
+SKILL_INSTRUCTION: Final = (
+    "The user has provided the following instruction alongside the skill invocation: "
+)
+RUNTIME_NOTE: Final = "\n\n[Runtime note:"
+BUNDLE: Final = " skill bundle,"
+BUNDLE_INSTRUCTION: Final = "\nUser instruction: "
+BUNDLE_FIRST_SKILL: Final = "\n\n[Loaded as part of the "
+AUTO_LOADED: Final = re.compile(r'^\[IMPORTANT: The "[^"]*" skill is auto-loaded\.')
+SKILL_DIR_NOTE_END: Final = "then run them with the terminal tool using the absolute path."
+
+
+def _between(c: str, start: int, marker: str, end: str = "") -> str | None:
+    """The text after `marker` (found at `start`) up to `end`, or to the end without one."""
+    if start < 0:
+        return None
+    rest = c[start + len(marker) :]
+    cut = rest.find(end) if end else -1
+    return (rest if cut < 0 else rest[:cut]).strip() or None
+
+
+def human_text(c: str | None) -> str | None:
+    """What a person typed in a user message, without what Hermes wraps around it: None for a
+    message clean_text drops, a cron prompt, or a skill invocation without an instruction; the
+    instruction of a /skill or /bundle invocation, or the text after the last loaded skill of an
+    auto-loaded one, themselves unwrapped the same way; otherwise clean_text's text."""
+    text, _view, hint = clean_text(c or "")
+    if text is None or hint == "cron":
+        return None
+    if text.startswith(SKILL_INVOKED):
+        # the kind is in Hermes' header line only: a skill body may mention either marker
+        header = text.split("\n", 1)[0]
+        if BUNDLE in header:  # the instruction precedes the loaded skills, in the header block
+            end = text.find(BUNDLE_FIRST_SKILL)
+            head = text if end < 0 else text[:end]
+            return human_text(_between(head, head.find(BUNDLE_INSTRUCTION), BUNDLE_INSTRUCTION))
+        if SKILL_LOADED in header:  # it follows the body, which may quote the marker: the last one
+            inner = _between(text, text.rfind(SKILL_INSTRUCTION), SKILL_INSTRUCTION, RUNTIME_NOTE)
+            return human_text(inner)  # a cron job's prompt can be the instruction
+        return None
+    if AUTO_LOADED.match(text):
+        end = text.rfind(SKILL_DIR_NOTE_END)
+        return human_text(text[end + len(SKILL_DIR_NOTE_END) :]) if end >= 0 else None
+    return text
+
+
 def cron_key(title: str | None) -> str:
     t = (title or "").split("|")[0].split("·")[0].strip()
     return t or "cron"

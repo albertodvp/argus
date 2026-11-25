@@ -71,6 +71,58 @@ by the same message timestamp. So:
 Derived data that is 1:1 with a captured row is a column on it (`tool_outcome.error_sig`,
 `skill_edit.evidence`); derived data with an identity of its own is a table.
 
+### Proposals
+
+The proposals stage (`derive.proposals`, `proposals/v2`) makes one model call over the intents with
+problems, the error patterns and the rules already learned. Under each listed intent the prompt
+shows up to 3 verbatim excerpts of its turns, labelled `[<intent id>]`: what the person typed first
+(up to 2), then a failed tool result, each whitespace-collapsed and cut at a word end within 200
+characters, within 720 characters per intent and 24 000 for the whole prompt (past 33 listed
+intents each gets an even share), so the excerpts add at most 24 000 characters to the call.
+
+Each proposal must quote, for every intent it cites, at least one excerpt copied verbatim from that
+intent's turns. Only what the model did not write counts:
+
+- a turn's messages are its user message and every later message of its session up to the next
+  user-role message, whether that one starts a turn or not (a `[SYSTEM:]` or background-process
+  notice also ends it, so what follows is no turn's evidence);
+- of a user message, only what the person typed (`signals.human_text`): clean_text's text without
+  Hermes' wrappers. A `/skill` or `/bundle` invocation (told apart by Hermes' header line, never by
+  the skill body) counts for its user instruction only, an
+  auto-loaded skill for the text after its last loaded skill, a cron prompt or a notice for
+  nothing; the skill bodies and Hermes' notes around them are not the request;
+- a tool result counts whole; an assistant reply never.
+
+A quote is normalised (casefolded, every whitespace run one space, the quote marks, ellipses and
+full stops around it stripped). It is valid when it is at least 12 characters and 3 words (`\w+`
+runs) of which 2 content words (4+ characters, not in derive's stopword list), or at least 8 CJK
+characters (hiragana, katakana, CJK ideographs, Hangul: scripts without spaces); either rule
+suffices, so a mixed-script quote passes on its words; and it occurs in the casefolded, whitespace-collapsed text of one of those messages
+(the whole stored message, not only the excerpt shown) on word boundaries: it neither starts nor
+ends inside a word (an end on a CJK character needs none). A quote that also occurs in the
+messages of another intent the same proposal cites backs neither (shared boilerplate such as
+"check current status" cannot make two intents). Invalid quotes are
+dropped one by one (`quotes_invalid` in the stage report); a cited intent without a valid quote
+leaves the evidence. A proposal is then kept only with 2+ quoted intents or a cited error pattern
+of 5+ hits (the bar the prompt states); otherwise it is not inserted, counted as `unquoted` and
+logged with the reason, before any patch call.
+
+`proposal.evidence` is `{intents, quotes, error_sigs, pattern_hits, overlaps}`; each quote is
+`{intent, text, session_id, message_id, ts, role}` (role `user` or `tool`, up to 3 per intent, text
+cut to 300 characters); `pattern_hits` is the hit count of its most frequent cited error pattern.
+When a session is deleted (`on_session_delete`, not an archive), its quotes leave every proposal's
+evidence, and so do the intents left without a quote; a proposal left below the bar leaves the
+latest pass (`proposals_last_ids`), so auto-apply never takes it, and stays for a person to decide.
+The deletion also leaves a tombstone (meta `deleted_sessions`, session id -> time, kept 7 days) in
+the same transaction. A proposals pass still holding the session in memory re-reads the
+tombstones under the write lock of each insert (`BEGIN IMMEDIATE`), drops their quotes and
+re-checks the bar there, and writes `proposals_last_ids` the same way with only the proposals still
+backed: whichever of the two commits first, the quote does not come back.
+Rows derived by `proposals/v1` have no `quotes`; they stay as they are, are shown without quotes and
+never qualify for auto-apply. The export carries quotes as `Proposal.quotes` (`{intent, text, sid,
+ts, role}`, the intent id mapped to the export's), and the dashboard shows them under the proposal,
+linked to the intent.
+
 ### Applying a decision
 
 `hermes argus apply` (current profile) and the dashboard's apply button (`apply_child.py`, run with
@@ -91,9 +143,10 @@ is recorded in `applied_by`; `--dry-run` needs no decision and writes nothing).
 **Auto-apply** (`argus/auto.py`, setting `auto_apply`, off by default) runs at the end of a derive
 pass of the profile whose setting enables it, under that profile's derive.lock (one pass at a time),
 and writes the same two rows a person's accept and apply write, with `decision.decided_by` and
-`apply_log.applied_by` = `auto` (`decision.note` = the policy version, `auto/v1`), then calls the
+`apply_log.applied_by` = `auto` (`decision.note` = the policy version, `auto/v2`), then calls the
 same `apply.run`. It considers only the proposals of the latest proposals pass (meta
-`proposals_last_ids`, written by the proposals stage), never one with a decision or an apply
+`proposals_last_ids`, written by the proposals stage) with 2+ intents quoted verbatim in their
+evidence (so never a `proposals/v1` row), never one with a decision or an apply
 attempt, nor one citing an intent that a decided or attempted proposal for the same skill cites (the
 same lesson, reworded). The decision is inserted only while the proposal has no decision and no
 attempt (one statement). When the apply is refused or fails it deletes its own decision again, so

@@ -11,8 +11,10 @@ A proposal is applied automatically only when all of these hold:
 
 - the latest proposals pass emitted it (meta `proposals_last_ids`), even if that pass ran before the
   setting was turned on; older proposals (the backlog) are never worked through;
-- its confidence is `high`, it cites at least `MIN_INTENTS` intents, and it patches an existing
-  skill with lines it only adds (one hunk, nothing removed): never a new skill;
+- its confidence is `high`, at least `MIN_INTENTS` of the intents it cites are quoted verbatim in
+  its evidence (`quotes`, checked against their turns by the proposals pass since proposals/v2:
+  an older proposal never qualifies), and it patches an existing skill with lines it only adds
+  (one hunk, nothing removed): never a new skill;
 - nobody decided on it or tried to apply it, nor on another proposal for the same skill that cites
   one of its intents: the proposals pass rewords one lesson from the same intents, and that lesson
   was already answered;
@@ -42,11 +44,11 @@ from typing import Final
 
 from . import apply, hermes_data, store
 from .dbtypes import APPLY_LOG_ROW, PROPOSAL_ROW, ProposalRow, count, query_as
-from .jsontypes import as_list, loads, loads_object
+from .jsontypes import as_list, as_object, loads, loads_object
 
 BY: Final = "auto"
 """decision.decided_by and apply_log.applied_by of an automatic apply."""
-POLICY: Final = "auto/v1"
+POLICY: Final = "auto/v2"
 MIN_INTENTS: Final = 2
 WEEK: Final = 7 * 86400.0
 SPENT: Final = ("applied", "staged", "unknown")
@@ -85,6 +87,24 @@ def intents_of(p: ProposalRow) -> set[str]:
     except ValueError:
         return set()
     return {i for i in as_list(ev.get("intents")) or [] if isinstance(i, str) and i}
+
+
+def quoted_intents(p: ProposalRow) -> set[str]:
+    """The intents a proposal cites that its evidence quotes verbatim (`quotes`, which the
+    proposals pass keeps only when found in that intent's turns); none before proposals/v2."""
+    try:
+        ev = loads_object(p["evidence"])
+    except ValueError:
+        return set()
+    quoted = {
+        i
+        for q in as_list(ev.get("quotes")) or []
+        if (o := as_object(q)) is not None
+        and isinstance(i := o.get("intent"), str)
+        and isinstance(t := o.get("text"), str)
+        and t.strip()
+    }
+    return quoted & intents_of(p)
 
 
 def last_pass(conn: sqlite3.Connection) -> set[str]:
@@ -175,7 +195,7 @@ def candidates(conn: sqlite3.Connection, home: Path) -> list[ProposalRow]:
         p
         for p in rows
         if additive(p["diff"])
-        and len(intents_of(p)) >= MIN_INTENTS
+        and len(quoted_intents(p)) >= MIN_INTENTS
         and _skill(p) not in stopped
         and not intents_of(p) & answered.get(_skill(p), set())
     ]

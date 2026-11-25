@@ -21,7 +21,7 @@ import re
 import sqlite3
 import time
 import traceback
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Literal, NotRequired, TypeAlias, TypeGuard, TypeVar
@@ -52,7 +52,7 @@ V_CONS: Final = "consolidate/v1"
 V_JUDGE: Final = "judge/v1"
 V_RUNS: Final = "runs/v1"
 V_REVIEW: Final = "edit_review/v2"
-V_PROP: Final = "proposals/v1"
+V_PROP: Final = "proposals/v2"
 
 SHORT_FOLLOWUP: Final = re.compile(
     r"^(ok|okay|si|sì|yes|y|vai|go|procedi|proceed|perfetto|perfect|autorizzo|invia|continua|continue|"
@@ -251,12 +251,18 @@ class _ProposalDiffRow(TypedDict):
     diff: str | None
 
 
+class _ProposalEvidenceRow(TypedDict):
+    id: str
+    evidence: str | None
+
+
 TURN_LINK: Final = TypeAdapter(_TurnLink)
 TURN_KEY_ROW: Final = TypeAdapter(_TurnKeyRow)
 LEARNED_ROW: Final = TypeAdapter(_LearnedRow)
 APPLIED_RULE_ROW: Final = TypeAdapter(_AppliedRuleRow)
 EDIT_ID_ROW: Final = TypeAdapter(_EditIdRow)
 PROPOSAL_DIFF_ROW: Final = TypeAdapter(_ProposalDiffRow)
+PROPOSAL_EVIDENCE_ROW: Final = TypeAdapter(_ProposalEvidenceRow)
 
 
 # ---------------------------------------------------------------- model answers
@@ -319,11 +325,17 @@ class _Review(TypedDict, total=False):
     evidence_in_run: str
 
 
+class _Quote(TypedDict, total=False):
+    intent: str
+    text: str
+
+
 class _Proposal(TypedDict, total=False):
     skill: str
     rule: str
     why: str
     intents: list[str]
+    quotes: list[_Quote]
     patterns: list[int]
     overlaps: list[str]
     confidence: str
@@ -1291,9 +1303,313 @@ def edit_review(px: Profile, llm: Calls) -> Stats:
 
 
 # ---------------------------------------------------------------- 6 proposals
+EXCERPT_CHARS: Final = 200
+"""proposals prompt: characters of one excerpt of an intent's turns."""
+EXCERPTS: Final = 3
+"""proposals prompt: excerpts per intent, its user messages first (up to 2), then a tool error."""
+INTENT_BUDGET: Final = 720
+"""proposals prompt: characters of one intent's excerpt lines, labels and newlines included."""
+EXCERPT_BUDGET: Final = 24000
+"""proposals prompt: characters of all excerpt lines; past EXCERPT_BUDGET // INTENT_BUDGET listed
+intents, each gets an even share."""
+QUOTE_MIN: Final = 12
+"""Characters a quote needs once normalised (qnorm)."""
+QUOTE_WORDS: Final = 3
+QUOTE_CONTENT_WORDS: Final = 2
+"""A quote needs QUOTE_WORDS words (\\w+ runs), QUOTE_CONTENT_WORDS of them content words (4+
+characters, not in STOP), so a generic phrase shared by many turns cannot back an intent."""
+QUOTE_MAX: Final = 300
+"""Characters of a quote kept in the evidence; a verbatim quote cut short is still verbatim."""
+QUOTES_PER_INTENT: Final = 3
+"""Valid quotes kept per intent; more are neither stored nor counted invalid."""
+QUOTED_INTENTS: Final = 2
+PATTERN_HITS: Final = 5
+"""A proposal is kept only with QUOTED_INTENTS intents quoted verbatim, or citing an error pattern
+of PATTERN_HITS hits or more: the bar PROP_SYS states, enforced."""
+QUOTE_TRIM: Final = " \"'`\u201c\u201d\u2018\u2019\u00ab\u00bb\u2026."
+"""Stripped from both ends of a quote: the marks and ellipses a model puts around an excerpt."""
+TOKEN: Final = re.compile(r"\w+")
+CJK: Final = re.compile(
+    "[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff66-\uff9f]"
+)
+"""Hiragana, katakana, CJK ideographs (with extension A and compatibility), Hangul syllables and
+half-width katakana: scripts written without spaces between words."""
+QUOTE_CJK: Final = 8
+"""CJK characters that make a quote long enough on their own, as an alternative to the word rule."""
+
+
+class QuoteSource(TypedDict):
+    """One message of an intent's turns, as quotes are checked against it."""
+
+    session_id: str
+    message_id: int
+    ts: float
+    role: str  # user or tool
+    text: str  # casefolded flat human_text (user) or content (tool)
+
+
+class Quote(TypedDict):
+    """A verbatim quote of a proposal's evidence (`proposal.evidence.quotes`)."""
+
+    intent: str
+    text: str
+    session_id: str
+    message_id: int
+    ts: float
+    role: str  # user or tool: never an assistant reply
+
+
+class Evidence(TypedDict):
+    """`proposal.evidence` as proposals/v2 writes it (v1 rows have no `quotes`)."""
+
+    intents: list[str]  # cited intents with at least one valid quote
+    quotes: list[Quote]
+    error_sigs: list[str]
+    pattern_hits: int  # hits of the most frequent cited error pattern when derived (0: none)
+    overlaps: list[str]
+
+
+EVIDENCE_V2: Final = TypeAdapter(Evidence)
+
+
+def backed(ev: Evidence) -> bool:
+    """Whether evidence meets the proposals bar: QUOTED_INTENTS quoted intents, or a cited error
+    pattern of PATTERN_HITS+ hits."""
+    quoted = {q["intent"] for q in ev["quotes"]}
+    n = sum(i in quoted for i in ev["intents"])
+    return n >= QUOTED_INTENTS or ev["pattern_hits"] >= PATTERN_HITS
+
+
+def flat(text: str) -> str:
+    """Every whitespace run one space, trimmed (the excerpts' form)."""
+    return " ".join(text.split())
+
+
+def qnorm(quote: str) -> str:
+    """A quote as it is compared: casefolded, flat, without the QUOTE_TRIM characters around it."""
+    return flat(quote.casefold()).strip(QUOTE_TRIM)
+
+
+def wordy(n: str) -> bool:
+    """Whether a normalised quote is long enough to be evidence: QUOTE_MIN characters and
+    QUOTE_WORDS words of which QUOTE_CONTENT_WORDS content words, or, for scripts written without
+    spaces, QUOTE_CJK CJK characters. Either suffices: a mixed-script quote passes on its words."""
+    if sum(1 for _m in CJK.finditer(n)) >= QUOTE_CJK:
+        return True
+    words = [m.group(0) for m in TOKEN.finditer(n)]
+    content = [w for w in words if len(w) >= 4 and w not in STOP]
+    return len(n) >= QUOTE_MIN and len(words) >= QUOTE_WORDS and len(content) >= QUOTE_CONTENT_WORDS
+
+
+def found_in(n: str, text: str) -> bool:
+    """Whether normalised quote `n` occurs in `text` on token boundaries: it neither starts nor ends
+    inside a word of `text`. An end on a CJK character needs no boundary: those scripts have no
+    spaces between words."""
+    head = r"(?<!\w)" if TOKEN.match(n[:1]) and not CJK.match(n[:1]) else ""
+    tail = r"(?!\w)" if TOKEN.match(n[-1:]) and not CJK.match(n[-1:]) else ""
+    return re.search(head + re.escape(n) + tail, text) is not None
+
+
+def turn_messages(
+    messages: Iterable[MessageRow], turns: Collection[Turn]
+) -> dict[TurnKey, list[MessageRow]]:
+    """The `messages` of each of `turns`: its user message and every later message of its session
+    up to the next user-role message, in time order. Every user-role message closes the turn, also
+    one that starts no turn (a [SYSTEM:] or background-process notice clean_text drops): what
+    follows it is not that turn's evidence."""
+    want = {tkey(t) for t in turns}
+    sids = {t["sid"] for t in turns}
+    by: dict[str, list[MessageRow]] = {}
+    for m in messages:
+        if m["session_id"] in sids:
+            by.setdefault(m["session_id"], []).append(m)
+    out: dict[TurnKey, list[MessageRow]] = {}
+    for sid, ms in by.items():
+        ms.sort(key=lambda m: (m["timestamp"], m["id"]))
+        cur: list[MessageRow] | None = None
+        for m in ms:
+            if m["role"] == "user":
+                cur = out.setdefault((sid, m["id"]), []) if (sid, m["id"]) in want else None
+            if cur is not None:
+                cur.append(m)
+    return out
+
+
+def quote_sources(tt: list[Turn], msgs: dict[TurnKey, list[MessageRow]]) -> list[QuoteSource]:
+    """The messages of an intent's turns (`tt`) quotes are checked against: what the model did not
+    write. A user message counts only for what the person typed (signals.human_text: no skill
+    scaffolding, cron prompt or system notice), a tool result whole; assistant replies never."""
+    out: list[QuoteSource] = []
+    for t in tt:
+        for m in msgs.get(tkey(t), []):
+            role = m["role"]
+            if role == "user":
+                text = signals.human_text(m["content"])
+            elif role == "tool":
+                text = m["content"]
+            else:
+                continue
+            if text:
+                out.append(
+                    QuoteSource(
+                        session_id=m["session_id"],
+                        message_id=m["id"],
+                        ts=m["timestamp"],
+                        role=role,
+                        text=flat(text.casefold()),
+                    )
+                )
+    return out
+
+
+def excerpt_lines(
+    iid: str, tt: list[Turn], msgs: dict[TurnKey, list[MessageRow]], budget: int
+) -> list[str]:
+    """Up to EXCERPTS verbatim excerpts of an intent's turns for the proposals prompt, each one
+    line labelled with the intent id, `budget` characters in all (newlines included): what the
+    person typed first (up to 2), then a tool error, then the rest of either; cut at a word end."""
+    users: list[tuple[str, str]] = []
+    errs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for t in tt:
+        ms = msgs.get(tkey(t), [])
+        users.append(("user", flat(signals.human_text(ms[0]["content"]) or "") if ms else ""))
+        errs.extend(
+            (f"tool {m['tool_name'] or '?'} error", flat(m["content"] or ""))
+            for m in ms
+            if m["role"] == "tool" and signals.tool_error(m["content"])
+        )
+    out: list[str] = []
+    for label, text in users[:2] + errs[:1] + users[2:] + errs[1:]:
+        if len(out) == EXCERPTS:
+            break
+        if not text or text.casefold() in seen:
+            continue
+        seen.add(text.casefold())
+        head = f"  [{iid}] {label}: "
+        room = min(EXCERPT_CHARS, budget - len(head) - 1)
+        if room < QUOTE_MIN:
+            break
+        shown = text[:room]
+        if len(text) > room:  # end on a whole word: a cut word cannot be quoted
+            cut = text[: room + 1].rfind(" ")
+            shown = text[:cut] if cut >= QUOTE_MIN else shown
+        out.append(head + shown)
+        budget -= len(out[-1]) + 1
+    return out
+
+
+def valid_quotes(
+    answer: list[_Quote], cited: Collection[str], sources: dict[str, list[QuoteSource]]
+) -> tuple[list[Quote], int]:
+    """The quotes of one proposal found verbatim (qnorm, on token boundaries: found_in) in a user
+    message or tool result of their intent's turns, up to QUOTES_PER_INTENT per intent, and how
+    many were dropped: an intent the proposal does not cite, too short (wordy), in none of those
+    messages (an assistant reply is not evidence), or also in the messages of another intent the
+    proposal cites (a phrase they share, e.g. boilerplate, backs neither). Repeats count once."""
+    kept: list[Quote] = []
+    bad = 0
+    seen: set[tuple[str, str]] = set()
+    for q in answer:
+        iid, n = q.get("intent", "").strip(), qnorm(q.get("text", ""))
+        if (iid, n) in seen:
+            continue
+        seen.add((iid, n))
+        ok = iid in cited and wordy(n)
+        src = (
+            next((s for s in sources.get(iid, []) if found_in(n, s["text"])), None) if ok else None
+        )
+        shared = src is not None and any(
+            found_in(n, s["text"]) for i in cited if i != iid for s in sources.get(i, [])
+        )
+        if src is None or shared:
+            bad += 1
+        elif sum(k["intent"] == iid for k in kept) < QUOTES_PER_INTENT:
+            kept.append(
+                Quote(
+                    intent=iid,
+                    text=flat(q.get("text", "")).strip(QUOTE_TRIM)[:QUOTE_MAX],
+                    session_id=src["session_id"],
+                    message_id=src["message_id"],
+                    ts=src["ts"],
+                    role=src["role"],
+                )
+            )
+    return kept, bad
+
+
+DELETED: Final = "deleted_sessions"
+"""meta key: JSON {session id: deletion time} of the sessions scrub_sessions removed (tombstones).
+A proposals pass that loaded such a session before its deletion drops its quotes when it inserts
+(in the insert's own transaction), so a quote never comes back after the scrub."""
+TOMBSTONE_DAYS: Final = 7
+"""Tombstones older than this are forgotten: by then no pass still holds the session in memory,
+and state.db no longer has it."""
+
+
+def _meta_put(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """meta_set without its commit: part of the caller's transaction."""
+    conn.execute(
+        "insert into meta(key, value) values (?, ?)"
+        " on conflict(key) do update set value = excluded.value",
+        (key, value),
+    )
+
+
+def tombstones(conn: sqlite3.Connection) -> dict[str, float]:
+    """The deleted sessions (meta DELETED) and when they were deleted."""
+    try:
+        raw = loads_object(store.meta_get(conn, DELETED) or "{}")
+    except ValueError:
+        return {}
+    return {k: float(v) for k, v in raw.items() if isinstance(v, (int, float))}
+
+
+def scrub_sessions(conn: sqlite3.Connection, sids: Collection[str]) -> int:
+    """After `sids` were deleted: record them as tombstones (meta DELETED), remove their quotes
+    from every proposal's evidence (the verbatim text must not outlive its session), and the
+    intents left without a quote. A proposal left below the bar (`backed`) leaves the latest pass
+    (meta proposals_last_ids), so auto-apply never takes it; it stays for a person, its evidence
+    as it now is. Writes without committing: one transaction with the caller's. Returns the
+    proposals changed."""
+    gone = set(sids)
+    now = time.time()
+    dead = {
+        k: v for k, v in tombstones(conn).items() if v >= now - TOMBSTONE_DAYS * 86400.0
+    } | dict.fromkeys(gone, now)
+    _meta_put(conn, DELETED, json.dumps(dead))
+    changed = 0
+    for r in query_as(
+        conn,
+        PROPOSAL_EVIDENCE_ROW,
+        "select id, evidence from proposal where evidence like ?",
+        ('%"quotes"%',),
+    ):
+        try:
+            ev = EVIDENCE_V2.validate_json(r["evidence"] or "")
+        except ValidationError:
+            continue
+        keep = [q for q in ev["quotes"] if q["session_id"] not in gone]
+        if len(keep) == len(ev["quotes"]):
+            continue
+        quoted = {q["intent"] for q in keep}
+        ev["quotes"], ev["intents"] = keep, [i for i in ev["intents"] if i in quoted]
+        conn.execute("update proposal set evidence = ? where id = ?", (json.dumps(ev), r["id"]))
+        changed += 1
+        if not backed(ev):
+            last = loads(store.meta_get(conn, auto.LAST_PASS) or "[]")
+            ids = [i for i in last if i != r["id"]] if isinstance(last, list) else []
+            _meta_put(conn, auto.LAST_PASS, json.dumps(ids))
+    return changed
+
+
 def proposals(px: Profile, llm: Calls, force: bool = False) -> Stats:
+    """Skill changes from the intents with problems and the recurring errors. Each cited intent
+    must be quoted verbatim from its turns (valid_quotes): the intents without a valid quote leave
+    the evidence, and a proposal left with fewer than QUOTED_INTENTS of them and no cited error
+    pattern of PATTERN_HITS+ hits is dropped (`unquoted`, logged) before any patch call."""
     conn = px.conn
-    stats = {"proposed": 0, "patched": 0, "skipped": 0}
+    stats = {"proposed": 0, "patched": 0, "skipped": 0, "unquoted": 0, "quotes_invalid": 0}
     changed = (
         px.changed.get("judge", 0)
         + px.changed.get("edit_review", 0)
@@ -1304,14 +1620,25 @@ def proposals(px: Profile, llm: Calls, force: bool = False) -> Stats:
     rows = px.intents()
     members = px.members(rows)
     pats = error_patterns(members)[:30]
-    il = "\n".join(
-        f"{k} [{v['status']}] {v['title']}: friction={v['friction'] or ''} next={v['next'] or ''}"
+    listed = [
+        k
         for k, v in rows.items()
         if k in members
         and v["status"]
         and v["kind"] not in ("probe", "chat")
         and (v["friction"] or v["status"] != "achieved")
-    )
+    ]
+    msgs = turn_messages(px.dump["messages"] or [], [t for tt in members.values() for t in tt])
+    budget = min(INTENT_BUDGET, EXCERPT_BUDGET // max(1, len(listed)))
+    lines: list[str] = []
+    for k in listed:
+        v = rows[k]
+        lines.append(
+            f"{k} [{v['status']}] {v['title']}: friction={v['friction'] or ''} "
+            f"next={v['next'] or ''}"
+        )
+        lines += excerpt_lines(k, members[k], msgs, budget)
+    il = "\n".join(lines)
     pl = "\n".join(
         f"{k}: [{p['cat']}] {p['tool']}: {p['sig']} — {p['hits']} hits, "
         f"{len(p['sessions'])} sessions, intents {list(p['intents'])[:6]}"
@@ -1348,12 +1675,31 @@ def proposals(px: Profile, llm: Calls, force: bool = False) -> Stats:
         for e in query_as(conn, EDIT_ID_ROW, "select ledger_entry_id from skill_edit")
     } | {a["ledger_entry"] for a in applied}
     old = {x["id"]: x for x in query_as(conn, PROPOSAL_DIFF_ROW, "select id, diff from proposal")}
+    sources: dict[str, list[QuoteSource]] = {}
     emitted: list[str] = []
     for p in r.get("proposals", []):
         rule, sk = p.get("rule", "").strip(), p.get("skill", "").strip()
         name = sk[4:].strip() if sk.startswith("new:") else sk
         if not rule or not name:
             stats["skipped"] += 1
+            continue
+        cited = [i for i in dict.fromkeys(p.get("intents", []), True) if i in members]
+        for i in cited:
+            if i not in sources:
+                sources[i] = quote_sources(members[i], msgs)
+        quotes, bad = valid_quotes(p.get("quotes", []), cited, sources)
+        stats["quotes_invalid"] += bad
+        pidx = [i for i in p.get("patterns", []) if 0 <= i < len(pats)]
+        evidence = Evidence(
+            intents=cited,
+            quotes=quotes,
+            error_sigs=[pats[i]["sig"] for i in pidx],
+            pattern_hits=max((pats[i]["hits"] for i in pidx), default=0),
+            overlaps=[i for i in p.get("overlaps", []) if i in edit_ids],
+        )
+        if not _bury(evidence, tombstones(conn)):
+            stats["unquoted"] += 1
+            llm.log(_dropped(sk, rule, evidence, len(cited), bad))
             continue
         path = files.get(name)
         pid = hashlib.sha256(f"{name}\n{rule}".encode()).hexdigest()[:16]
@@ -1362,13 +1708,17 @@ def proposals(px: Profile, llm: Calls, force: bool = False) -> Stats:
         if path is not None and diff is None:
             diff = patch(path.read_text(encoding="utf-8", errors="replace"), rule, llm)
             stats["patched"] += diff is not None
-        pidx = [i for i in p.get("patterns", []) if 0 <= i < len(pats)]
-        evidence = {
-            "intents": [i for i in p.get("intents", []) if i in members],
-            "error_sigs": [pats[i]["sig"] for i in pidx],
-            "overlaps": [i for i in p.get("overlaps", []) if i in edit_ids],
-        }
         confidence = p.get("confidence")
+        # a session deleted since it was loaded (the patch call, the model call) is tombstoned:
+        # its quotes go, read under the write lock with the insert, so a scrub that ran meanwhile
+        # is not undone and one that runs later sees this row
+        conn.commit()
+        conn.execute("begin immediate")
+        if not _bury(evidence, tombstones(conn)):
+            conn.commit()
+            stats["unquoted"] += 1
+            llm.log(_dropped(sk, rule, evidence, len(cited), 0) + " (a quoted session was deleted)")
+            continue
         conn.execute(
             "insert or replace into proposal (id, skill_name, is_new_skill, file, rule, why, "
             "diff, confidence, evidence, derived_by) values (?,?,?,?,?,?,?,?,?,?)",
@@ -1389,10 +1739,44 @@ def proposals(px: Profile, llm: Calls, force: bool = False) -> Stats:
         conn.commit()
         emitted.append(pid)
         stats["proposed"] += 1
-    store.meta_set(conn, "proposals_at", str(time.time()))
-    store.meta_set(conn, auto.LAST_PASS, json.dumps(emitted))
+    # under the write lock: a proposal a scrub left below the bar since its insert stays out
+    conn.commit()
+    conn.execute("begin immediate")
+    live = {
+        x["id"]
+        for x in query_as(conn, PROPOSAL_EVIDENCE_ROW, "select id, evidence from proposal")
+        if x["id"] in emitted and _still_backed(x["evidence"])
+    }
+    _meta_put(conn, "proposals_at", str(time.time()))
+    kept: list[str] = [i for i in emitted if i in live]
+    _meta_put(conn, auto.LAST_PASS, json.dumps(kept))
     conn.commit()
     return stats
+
+
+def _bury(ev: Evidence, dead: Collection[str]) -> bool:
+    """Drop from `ev` the quotes of deleted sessions (`dead`), then keep in `ev["intents"]` only
+    the intents still quoted; whether it meets the bar (`backed`)."""
+    ev["quotes"] = [q for q in ev["quotes"] if q["session_id"] not in dead]
+    quoted = {q["intent"] for q in ev["quotes"]}
+    ev["intents"] = [i for i in ev["intents"] if i in quoted]
+    return backed(ev)
+
+
+def _still_backed(text: str | None) -> bool:
+    try:
+        return backed(EVIDENCE_V2.validate_json(text or ""))
+    except ValidationError:
+        return False
+
+
+def _dropped(sk: str, rule: str, ev: Evidence, cited: int, bad: int) -> str:
+    return (
+        f"argus: proposals: dropped {sk!r} ({rule[:60]!r}): {len(ev['intents'])} of {cited} cited"
+        f" intents quoted verbatim ({bad} quotes invalid), top cited error pattern"
+        f" {ev['pattern_hits']} hits; needs {QUOTED_INTENTS} quoted intents or a pattern of"
+        f" {PATTERN_HITS}+ hits"
+    )
 
 
 def applied_rules(conn: sqlite3.Connection) -> list[_AppliedRuleRow]:

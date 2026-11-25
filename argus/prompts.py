@@ -245,6 +245,13 @@ PROP_SYS: Final = (
     "tried to do (intents) and from recurring tool/runtime errors.\n"
     "Only propose a change backed by at least 2 intents or an error pattern with 5+ hits. "
     "Prefer patching an existing skill; propose a new skill only when none fits.\n"
+    "Every intent you cite needs at least one quote: a short excerpt (max 200 characters) "
+    "copied verbatim, character for character, from that intent's user messages or tool "
+    "results, as listed under it with its id in brackets; the assistant's replies do not count. "
+    "Quote whole words, at least 3 of them, and something specific to that intent, not a "
+    "generic phrase. Do not paraphrase, translate, skip words or join excerpts. "
+    "Quotes are checked against the stored transcripts: an intent without a verbatim quote is "
+    "dropped from the evidence, and a proposal left without enough evidence is discarded.\n"
     "Do not repeat a rule the harness already learned (listed under HERMES EDITS); if your "
     "proposal overlaps one, cite its id in overlaps.\n"
     "English, plain, specific: the rule must be something the agent can follow in its next "
@@ -271,6 +278,23 @@ PROP_SCHEMA: Final[JsonObject] = {
                         "description": "the evidence in one sentence, max 25 words",
                     },
                     "intents": {"type": "array", "items": {"type": "string"}},
+                    "quotes": {
+                        "type": "array",
+                        "description": "verbatim excerpts of the cited intents' turns, at least "
+                        "one per cited intent",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "intent": {"type": "string", "description": "the intent id"},
+                                "text": {
+                                    "type": "string",
+                                    "description": "copied verbatim from that intent's turns, "
+                                    "max 200 characters",
+                                },
+                            },
+                            "required": ["intent", "text"],
+                        },
+                    },
                     "patterns": {
                         "type": "array",
                         "items": {"type": "integer"},
@@ -288,6 +312,7 @@ PROP_SCHEMA: Final[JsonObject] = {
                     "rule",
                     "why",
                     "intents",
+                    "quotes",
                     "patterns",
                     "overlaps",
                     "confidence",

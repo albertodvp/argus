@@ -1,6 +1,7 @@
 """Hooks record what Hermes sends them whatever its types: a hook argument of an unexpected type
 narrows to a usable value instead of dropping the row."""
 
+import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 import pytest
 from test_window import make_home
 
-from argus import capture, hermes_data, store
+from argus import capture, derive, hermes_data, store
 from argus.dbtypes import query
 
 
@@ -65,6 +66,31 @@ def test_session_delete_keeps_its_skill_edit_unlinked(home: Path) -> None:
     assert got == [
         {"ledger_entry_id": "e1", "session_id": None, "turn_id": None, "evidence": "speculative"}
     ]
+
+
+def test_session_delete_scrubs_the_quotes_proposals_keep(home: Path) -> None:
+    """Proposals quote turns verbatim: deleting the session takes its quotes along (derive's
+    scrub_sessions, through the writer)."""
+    ev = derive.Evidence(
+        intents=["A", "B"],
+        quotes=[
+            derive.Quote(intent=i, text="words", session_id=sid, message_id=1, ts=0.0, role="user")
+            for i, sid in (("A", "s1"), ("B", "s2"))
+        ],
+        error_sigs=[],
+        pattern_hits=0,
+        overlaps=[],
+    )
+    store.writer(home).put(
+        "insert into proposal (id, skill_name, rule, evidence, derived_by)"
+        " values ('p1', 'sk', 'r', ?, 'test')",
+        (json.dumps(ev),),
+    )
+    capture.on_session_delete(deleted_ids=["s1"])
+    [row] = rows(home, "select evidence from proposal")
+    got = derive.EVIDENCE_V2.validate_json(str(row["evidence"]))
+    assert got["intents"] == ["B"]
+    assert [q["session_id"] for q in got["quotes"]] == ["s2"]
 
 
 def write_ledger(home: Path, entries: list[tuple[str, str, float, str | None]]) -> None:

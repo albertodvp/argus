@@ -28,6 +28,7 @@ CONTRACT: dict[str, frozenset[str]] = {
         exporttypes.Session,
         exporttypes.Trend,
         exporttypes.Proposal,
+        exporttypes.Quote,
         exporttypes.SkillAbsence,
         exporttypes.Harness,
         exporttypes.ExportMeta,

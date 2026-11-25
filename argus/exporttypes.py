@@ -34,6 +34,7 @@ __all__ = [
     "Learning",
     "ProfileCounts",
     "Proposal",
+    "Quote",
     "RefreshBody",
     "Review",
     "Run",
@@ -181,12 +182,23 @@ class Trend(TypedDict):
     summary: str
 
 
+class Quote(TypedDict):
+    """A verbatim excerpt of an intent's turns backing a proposal (proposals/v2 on)."""
+
+    intent: str  # an intent id of this export
+    text: str
+    sid: str  # the session of the quoted message
+    ts: float  # the quoted message's time
+    role: str  # the quoted message's role: user or tool
+
+
 class Proposal(TypedDict):
     id: str
     skill: str
     rule: str
     why: str
     intents: list[str]
+    quotes: list[Quote]  # empty for proposals derived before proposals/v2
     patterns: list[str]
     overlaps: JsonValue
     confidence: str

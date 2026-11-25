@@ -40,6 +40,7 @@ from .exporttypes import (
     Intent,
     Learning,
     Proposal,
+    Quote,
     Run,
     RunOutcome,
     RunStatus,
@@ -262,10 +263,22 @@ def _installed(home: Path) -> int:
 
 
 # ---------------------------------------------------------------- a proposal's evidence
+class _EvidenceQuote(TypedDict, total=False):
+    """One of proposal.evidence.quotes (derive.Quote)."""
+
+    intent: str
+    text: str
+    session_id: str
+    message_id: int
+    ts: float
+    role: str
+
+
 class _Evidence(TypedDict, total=False):
-    """proposal.evidence as derive.proposals writes it."""
+    """proposal.evidence as derive.proposals writes it (`quotes` since proposals/v2)."""
 
     intents: list[str]
+    quotes: list[_EvidenceQuote]
     error_sigs: list[str]
     overlaps: list[str]
 
@@ -604,6 +617,18 @@ def _proposals(
                 for f in (_final(p["intents"], i) for i in ev.get("intents", []))
                 if f is not None and (name, f) in ids
             ]
+            quotes: list[Quote] = [
+                {
+                    "intent": ids[(name, qi)],
+                    "text": q.get("text", ""),
+                    "sid": q.get("session_id", ""),
+                    "ts": q.get("ts", 0.0),
+                    "role": q.get("role", ""),
+                }
+                for q in ev.get("quotes", [])
+                if (qi := _final(p["intents"], q.get("intent", ""))) is not None
+                and (name, qi) in ids
+            ]
             pats: list[str] = []
             for sig in ev.get("error_sigs", []):
                 pats += (
@@ -630,6 +655,7 @@ def _proposals(
                     "rule": pr["rule"],
                     "why": pr["why"] or "",
                     "intents": list(dict.fromkeys(its, True)),
+                    "quotes": quotes,
                     "patterns": pats,
                     "overlaps": list[JsonValue](ev.get("overlaps", [])),
                     "confidence": pr["confidence"] or "medium",

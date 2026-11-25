@@ -269,6 +269,10 @@ details.ch.plugin{border-left:2px solid #c58cff}
 .cb{padding:12px 16px}
 .cb .p{color:var(--muted);font-size:12.5px;margin-bottom:6px}
 .cb pre.diff{margin:10px 0}
+.cb .quotes{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+blockquote.qt{margin:0;padding:1px 0 1px 10px;border-left:2px solid #c58cff;font-size:12px;color:var(--fg);overflow-wrap:anywhere}
+blockquote.qt a{display:block;font-size:11px;color:var(--muted)}
+blockquote.qt a:hover{color:var(--sig)}
 .cb .acts{display:flex;gap:8px;align-items:center}
 details.ch.d-reject .crule,details.ch.d-dismiss .crule{text-decoration:line-through;color:var(--muted)}
 details.ch.d-accept{border-left-color:var(--sig)} details.ch.d-keep .cdot{box-shadow:0 0 0 3px var(--bg),0 0 0 4px var(--sig)}

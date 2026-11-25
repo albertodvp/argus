@@ -662,12 +662,16 @@ function changeRow(hk, c) {
   if (c.src === 'plugin') {
     const p = c.p, dec = decisions[pkey(p.profile, p.id)];
     const pats = (p.patterns || []).map(key => m.sigs.find(s => `${s.tool}|${s.sig}` === key)).filter(s => s !== undefined);
+    // verbatim excerpts of the cited intents' turns, checked by derive (none before proposals/v2)
+    const quotes = (p.quotes || []).filter(q => m.I[q.intent] !== undefined);
     return `<details class="ch plugin ${dec ? 'd-' + tok(dec) : ''}" id="e-${esc(c.id)}" data-k="${esc(k)}" ${isOpen(k)}><summary>
       <span class="cdot"></span><span class="cw">proposed</span><span class="ctags"><span class="tag c-${tok(p.confidence)}" data-tip="model confidence">${esc(p.confidence)}</span>${applyTag('proposal', p.profile, p.id, p)}</span><span class="crule">${clip(c.rule, 60)}</span><span class="cd"><span class="add">+${c.plus}</span></span></summary>
       <div class="cb"><div class="p">${esc(c.why)}</div>${applyLine('proposal', p.profile, p.id, p)}
         <div class="ev2">${(p.intents || []).map(id => m.I[id]).filter(i => i !== undefined).map(i => `<a class="chip" href="#/${upart(hk)}/intents/${upart(i.id)}"><span class="dot s-${tok(i.status)}"></span>${esc(i.title)}</a>`).join('')}
           ${pats.map(s => `<a class="chip" href="#/${upart(hk)}/overview?sig=${upart(s.k)}">${catTag(s.cat)} ${s.hits}× ${esc((s.tool === 'runtime' ? '' : s.tool + ': ') + s.sig).slice(0, 70)}</a>`).join('')}
           ${jsonList(p.overlaps || []).map(o => m.h.learnings.find(e => e.entry === o)).filter(e => e !== undefined).map(e => `<a class="chip" href="javascript:void 0" data-goto="${esc(e.id)}" data-tip="${esc(cut(e.review?.learned || '', 80))}">overlaps hermes edit ${when(e.ts)}</a>`).join('')}</div>
+        ${quotes.length ? `<div class="quotes">${quotes.map(q => { const i = must(m.I[q.intent]);
+          return `<blockquote class="qt"><a href="#/${upart(hk)}/intents/${upart(i.id)}" data-tip="${esc(`verbatim from ${q.role === 'user' ? 'a request' : 'a tool result'} · ${when(q.ts)} · session ${q.sid.slice(-8)}`)}"><span class="dot s-${tok(i.status)}"></span>${esc(cut(i.title, 60))}</a>${esc(q.text)}</blockquote>`; }).join('')}</div>` : ''}
         <pre class="diff">${diffHtml(c.diff)}</pre>
         ${carried('proposal', p.profile, p.id, p) ? '' : `<div class="acts"><button class="btn keep ${dec === 'accept' ? 'on' : ''}" data-pdec="accept" data-id="${esc(p.id)}" data-prof="${esc(p.profile)}" data-tip="adds it to the dock; nothing runs until apply">accept</button>
           <button class="btn rej ${dec === 'dismiss' ? 'on' : ''}" data-pdec="dismiss" data-id="${esc(p.id)}" data-prof="${esc(p.profile)}">dismiss</button></div>`}</div></details>`;

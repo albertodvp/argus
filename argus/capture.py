@@ -20,7 +20,7 @@ from typing import Final, ParamSpec, TypeVar
 
 from pydantic import TypeAdapter, ValidationError
 
-from . import hermes_data, hermes_internals, signals, store
+from . import derive, hermes_data, hermes_internals, signals, store
 from .jsontypes import as_number
 
 log = logging.getLogger("hermes.plugins.argus")
@@ -259,6 +259,13 @@ def on_session_delete(
         f" where session_id in ({ph})",
         tuple(ids),
     )
+    sids = {str(s) for s in ids}
+
+    def scrub_quotes(conn: sqlite3.Connection) -> None:
+        # proposals keep verbatim text of the sessions they quote: it goes with the session
+        derive.scrub_sessions(conn, sids)
+
+    w.call(scrub_quotes)
 
 
 # ---------------------------------------------------------------- skill_manage -> ledger entry

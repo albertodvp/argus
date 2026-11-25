@@ -11,7 +11,8 @@ is a Hermes plugin that reads that work from the side of the people using the ag
 - **Edit review.** Every skill edit Hermes applies is checked against the run that produced it: did a
   failure, a success or a correction motivate it, or nothing?
 - **Proposals.** Rules of its own, backed by several intents or a recurring error, as a minimal diff
-  on the current `SKILL.md`.
+  on the current `SKILL.md`. Each cited intent must be quoted verbatim from its turns, or it does
+  not count.
 - **A person decides.** Keep or reject each edit, accept or dismiss each proposal. Argus writes a
   skill only on an explicit apply, or, if you opt in, applies the best-backed additive proposals
   itself and shows each one with its undo.
@@ -144,7 +145,7 @@ can be rolled back. Details, with references into the Hermes source:
 | The review is pushed to save something | edits without evidence are counted per skill among Hermes' own edits (not those a person wrote, such as an applied proposal); a skill where they are 3+ and 30%+ is flagged "needs review" |
 | Edits are per skill, work is per goal | each edit is tied to its intent and to the intents that read the skill afterwards |
 | The ledger writes `curator` for both review and curator | `review` when the entry's session has messages in `state.db`, else `curator` |
-| No rule is drawn from several sessions | proposals need 2+ intents or an error seen 5+ times |
+| No rule is drawn from several sessions | proposals need 2+ intents, each quoted verbatim from its turns, or an error seen 5+ times; Argus checks the quotes and drops the rest |
 | Nothing waits for a person | keep / reject, accept / dismiss, then apply |
 
 Edit labels:
@@ -158,6 +159,13 @@ Edit labels:
 
 Labels are a model's judgement: open the edit to check. Before/after counts describe what happened
 next; they do not prove an edit helped.
+
+A proposal shows the words it rests on: for each intent it cites, an excerpt of that intent's turns
+(what the person typed, without the skill bodies Hermes wraps around it, or a tool result; never
+the agent's own reply) the model copied verbatim, linked to the intent. Argus checks every quote
+against the stored messages (case and spacing aside, whole words, 3+ words) and drops the ones it cannot find; a proposal left without 2
+quoted intents or an error seen 5+ times is discarded, and `hermes argus derive` logs why
+([details](docs/data-model.md#proposals)). Deleting a session removes its quotes too.
 
 ### Decisions
 
@@ -188,8 +196,9 @@ proposal qualifies only when all hold:
 
 - the latest proposals pass emitted it (even one that ran before you turned the setting on); the
   backlog of older proposals is never worked through;
-- confidence `high`, 2+ intents cited, and a patch that only adds lines to an existing skill: never
-  a new skill, never a removed line;
+- confidence `high`, 2+ intents cited and quoted verbatim (proposals from before the quotes check
+  never qualify), and a patch that only adds lines to an existing skill: never a new skill, never a
+  removed line;
 - nobody decided on it or tried to apply it, nor on another proposal for that skill citing one of
   its intents (the same lesson reworded: you already answered it);
 - no change to that skill was rolled back since auto-apply first wrote or staged one there (from an

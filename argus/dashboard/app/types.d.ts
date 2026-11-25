@@ -156,12 +156,27 @@ declare namespace Argus {
     summary: string;
   }
 
+  /** A verbatim excerpt of an intent's turns backing a proposal (proposals/v2 on). */
+  interface Quote {
+    /** an intent id of this export */
+    intent: string;
+    text: string;
+    /** the session of the quoted message */
+    sid: string;
+    /** the quoted message's time */
+    ts: number;
+    /** the quoted message's role: user or tool (never an assistant reply) */
+    role: string;
+  }
+
   interface Proposal {
     id: string;
     skill: string;
     rule: string;
     why: string;
     intents: string[];
+    /** empty for proposals derived before proposals/v2 */
+    quotes: Quote[];
     patterns: string[];
     overlaps: JsonValue;
     confidence: string;

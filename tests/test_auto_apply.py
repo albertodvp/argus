@@ -1,11 +1,13 @@
 """Opt-in auto-apply: off unless the setting is a real `true`; it applies only additive,
-high-confidence proposals of the latest pass backed by 2+ intents, through the same apply as a
-person, within its weekly and per-skill budget, and never again on a skill where one was rolled
-back. Hermes' skill functions are faked with a file-backed ledger, as skill_manage writes it."""
+high-confidence proposals of the latest pass backed by 2+ intents quoted verbatim, through the
+same apply as a person, within its weekly and per-skill budget, and never again on a skill where
+one was rolled back. Hermes' skill functions are faked with a file-backed ledger, as
+skill_manage writes it."""
 
 import argparse
 import hashlib
 import json
+import re
 import sqlite3
 import time
 import types
@@ -147,9 +149,24 @@ def _proposal(
     diff: str | None = None,
     new: bool = False,
     latest: bool = True,
+    quoted: tuple[str, ...] | None = None,
 ) -> None:
+    """`quoted`: the intents with a verbatim quote (default: every cited one); a proposal derived
+    before proposals/v2 has no `quotes` at all (`quoted=()`)."""
     cited: JsonList = [*intents]
     evidence: JsonObject = {"intents": cited, "error_sigs": [], "overlaps": []}
+    if quoted != ():
+        evidence["quotes"] = [
+            {
+                "intent": i,
+                "text": f"the words of {i}",
+                "session_id": "s1",
+                "message_id": 1,
+                "ts": 0.0,
+                "role": "user",
+            }
+            for i in (intents if quoted is None else quoted)
+        ]
     conn = store.open_db(home)
     try:
         conn.execute(
@@ -253,6 +270,9 @@ def test_a_dry_run_decides_and_writes_nothing(home: Path, monkeypatch: pytest.Mo
         {"confidence": "medium"},
         {"intents": ("i1",)},
         {"intents": ("i1", "i1")},
+        {"quoted": ()},  # derived before proposals/v2: no quotes
+        {"quoted": ("i1",)},  # one of its two intents quoted
+        {"quoted": ("i1", "i9")},  # a quote of an intent it does not cite
         {"diff": "@@ -3 +3 @@\n-Step one.\n+Check the lock first.\n"},
         {"new": True, "skill": "fresh"},
         {"latest": False},
@@ -429,13 +449,18 @@ class ProposeLlm:
             return {"status": "partial", "friction": "the user corrected the plan twice"}
         if purpose == "argus.proposals":
             self.prompts.append(text)
+            ex = [
+                (m.group(1), m.group(2))
+                for m in re.finditer(r"^  \[([^\]]+)\] user: (.*)$", text, re.M)
+            ][:2]
             return {
                 "proposals": [
                     {
                         "skill": "sk",
                         "rule": "Say what you checked.",
                         "why": "w",
-                        "intents": [],
+                        "intents": [i for i, _t in ex],
+                        "quotes": [{"intent": i, "text": t} for i, t in ex],
                         "patterns": [],
                         "overlaps": ["e9", "argus-staged", "no-such-entry"],
                         "confidence": "high",
